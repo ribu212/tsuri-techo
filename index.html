@@ -1160,7 +1160,9 @@ function catchDetail(id){
     <section class="sd-sec"><h3>釣った時の条件</h3>
       ${c.cond ? `<dl class="dl">${condHtml(c)}</dl>` : spotById(c.spotId) ? '<p class="small muted" style="margin:0">まだ取得していません。</p><button class="btn" id="cd-cond" type="button">条件を取得する</button>' : '<p class="small muted" style="margin:0">釣り場が決まっていない記録は、条件を取得できません。</p>'}
     </section>
+    <button class="btn sea block" id="cd-share" type="button">画像を作って送る（LINE など）</button>
     <div class="grid2"><button class="btn" id="cd-edit" type="button">直す</button><button class="btn danger" id="cd-del" type="button">削除</button></div>`, b => {
+    b.querySelector('#cd-share').onclick = () => shareSheet(c);
     b.querySelector('#cd-cond')?.addEventListener('click', async e => {
       e.target.disabled = true; e.target.textContent = '取得しています…';
       const s = spotById(c.spotId), ok = await attachConditions(c.id, s.lat, s.lng);
@@ -1181,6 +1183,60 @@ function catchDetail(id){
       if (!del.dataset.sure){ del.dataset.sure = 1; del.textContent = 'もう一度押すと削除'; return; }
       await S.deleteCatch(c.id); closeSheet(); toast('削除しました');
     };
+  });
+}
+
+/* ---- 釣果を見せる画像（1080×1350、Instagram や LINE で見やすい縦長）----
+   上：釣果の写真（なければアプリのアイコン）　下：魚・大きさ・釣り場・日付・潮回り */
+const loadImg = src => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+async function makeShareImage(c, photoId){
+  const W = 1080, H = 1350, PH = 960;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H; const g = cv.getContext('2d');
+  try { await Promise.all([document.fonts.load('900 80px "Zen Maru Gothic"'), document.fonts.load('700 40px "Noto Sans JP"')]); } catch {}
+  g.fillStyle = '#0f3d4c'; g.fillRect(0, 0, W, H);
+  // 写真を枠いっぱいに（はみ出す分は切る）
+  const src = photoId ? await S.getPhoto(photoId) : null;
+  if (src){
+    const im = await loadImg(src), s = Math.max(W / im.width, PH / im.height);
+    g.drawImage(im, (W - im.width * s) / 2, (PH - im.height * s) / 2, im.width * s, im.height * s);
+  } else {
+    const im = await loadImg('icons/icon-512.png'); g.drawImage(im, (W - 600) / 2, (PH - 600) / 2, 600, 600);
+  }
+  // 下の帯
+  g.fillStyle = '#0f3d4c'; g.fillRect(0, PH, W, H - PH);
+  g.fillStyle = '#d9482a'; g.fillRect(0, PH, W, 10);
+  const fit = (text, weight, size, family, maxW) => { let s = size; do { g.font = `${weight} ${s}px ${family}`; s -= 4; } while (g.measureText(text).width > maxW && s > 28); };
+  const pad = 64, maxW = W - pad * 2;
+  g.fillStyle = '#ffffff'; g.textBaseline = 'alphabetic';
+  const title = fishSummary(c); fit(title, 900, 88, '"Zen Maru Gothic", sans-serif', maxW); g.fillText(title, pad, PH + 120);
+  const ms = maxSizeOf(c), sub = [ms != null ? `最大 ${ms}cm` : '', `合計 ${countOf(c)}匹`].filter(Boolean).join('　');
+  g.fillStyle = '#ffb199'; fit(sub, 700, 52, '"Noto Sans JP", sans-serif', maxW); g.fillText(sub, pad, PH + 200);
+  const [y, mo, d] = c.at.slice(0, 10).split('-').map(Number);
+  const line = [`${y}年${mo}月${d}日`, spotById(c.spotId)?.name || c.spotName, c.tide].filter(Boolean).join('　');
+  g.fillStyle = '#cfe3e8'; fit(line, 700, 40, '"Noto Sans JP", sans-serif', maxW); g.fillText(line, pad, PH + 270);
+  g.fillStyle = 'rgba(255,255,255,.55)'; g.font = '700 30px "Zen Maru Gothic", sans-serif'; g.textAlign = 'right'; g.fillText('釣り手帳', W - pad, H - 36);
+  return new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9));
+}
+async function shareSheet(c, photoId = photosOf(c)[0]?.id){
+  openSheet(`${sheetHead('画像を作って送る')}<p class="muted" style="margin:0">画像を作っています…</p>`);
+  let blob;
+  try { blob = await makeShareImage(c, photoId); } catch { return openSheet(`${sheetHead('画像を作って送る')}<p class="err">画像を作れませんでした。</p>`); }
+  const url = URL.createObjectURL(blob), name = `釣果_${c.at.slice(0, 10)}.jpg`;
+  const file = new File([blob], name, {type: 'image/jpeg'});
+  const canShare = !!navigator.canShare?.({files: [file]});
+  const ps = photosOf(c);
+  openSheet(`${sheetHead('画像を作って送る')}
+    <img class="photo-big" src="${url}" alt="作った画像">
+    ${ps.length > 1 ? `<p class="small muted" style="margin:0">使う写真を選べます</p><div class="photo-strip" id="sh-strip">${ps.map(p => `<button type="button" class="ph" data-pid="${esc(p.id)}" aria-pressed="${p.id === photoId}"><img src="${esc(p.thumb)}" alt=""></button>`).join('')}</div>` : ''}
+    ${canShare ? '<button class="btn primary block" id="sh-go" type="button">送る・保存する</button><p class="small muted" style="margin:0">LINE を選ぶとそのまま送れます。「画像を保存」で写真アプリにも保存できます。</p>'
+      : '<p style="margin:0">画像を<b>長押し</b>すると、保存したり送ったりできます。</p><a class="btn block" id="sh-dl" href="' + url + '" download="' + esc(name) + '">画像をダウンロード</a>'}
+    <button class="btn block" id="sh-back" type="button">釣果の画面に戻る</button>`, b => {
+    b.querySelector('#sh-back').onclick = () => catchDetail(c.id);
+    b.querySelectorAll('#sh-strip .ph').forEach(x => x.onclick = () => shareSheet(c, x.dataset.pid));
+    b.querySelector('#sh-go')?.addEventListener('click', async () => {
+      try { await navigator.share({files: [file], title: '釣果', text: `${fishSummary(c)}（${spotById(c.spotId)?.name || c.spotName || ''}）`}); }
+      catch (e){ if (e?.name !== 'AbortError') toast('送れませんでした。画像を長押しして保存してください'); }
+    });
   });
 }
 
