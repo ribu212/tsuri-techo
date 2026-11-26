@@ -126,8 +126,34 @@ textarea{min-height:80px;resize:vertical}
 .month-h{font-family:var(--f-head);color:var(--muted);font-size:.95rem;margin-top:6px}
 
 /* 地図 */
-#map{height:56vh;min-height:300px;border-radius:14px;border:1px solid var(--line);z-index:0}
+.map-wrap{position:relative}
+#map{height:min(62vh,560px);min-height:340px;border-radius:14px;border:1px solid var(--line);z-index:0}
 .bobber{width:26px;height:26px;border-radius:50%;background:linear-gradient(var(--float) 50%,#fff 50%);border:2px solid #222;box-shadow:0 2px 4px rgba(0,0,0,.35)}
+/* 釣り場の目印：ウキ＋名前の札（地図の上なので、テーマに関係なく白い札で読みやすく） */
+.pin{position:relative;width:30px;height:30px}
+.pin .bobber{width:30px;height:30px}
+.pin-label{position:absolute;left:34px;top:3px;white-space:nowrap;background:#fff;color:#142a30;border:1px solid #9fb5b9;border-radius:6px;
+  padding:1px 7px;font:700 14px/1.5 var(--f-body);box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.tiles-pale{filter:saturate(.45) brightness(1.03)}   /* 道路などの色を抑えて、海岸線と釣り場の目印を目立たせる */
+.here-dot{width:18px;height:18px;border-radius:50%;background:#2a7fff;border:3px solid #fff;box-shadow:0 0 0 6px rgba(42,127,255,.25)}
+.leaflet-touch .leaflet-bar a{width:46px;height:46px;line-height:46px;font-size:24px}
+.map-btns{position:absolute;right:10px;top:10px;z-index:600;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.mbtn{background:#fff;color:#142a30;border:1px solid #9fb5b9;border-radius:10px;padding:9px 12px;font-weight:700;font-size:.95rem;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.2)}
+.crosshair{position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;z-index:500;pointer-events:none}
+.crosshair::before,.crosshair::after{content:"";position:absolute;background:#e0301e;box-shadow:0 0 0 2px #fff}
+.crosshair::before{left:50%;top:0;bottom:0;width:4px;margin-left:-2px}
+.crosshair::after{top:50%;left:0;right:0;height:4px;margin-top:-2px}
+.add-bar{background:var(--card);border:2px solid var(--float);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.add-bar p{margin:0}
+#map-results button{text-align:left}
+
+/* ログイン画面 */
+body.signed-out main, body.signed-out .tabbar{display:none}
+#auth{max-width:480px;margin:0 auto;padding:24px max(16px,env(safe-area-inset-right,0px)) 48px max(16px,env(safe-area-inset-left,0px));display:flex;flex-direction:column;gap:16px}
+#auth .lead{margin:0;color:var(--muted)}
+.err{color:var(--float);font-weight:700;font-size:.95rem;margin:0}
+.ok-msg{color:var(--ok);font-weight:700;font-size:.95rem;margin:0}
+.linkbtn{background:none;border:0;color:var(--sea);text-decoration:underline;cursor:pointer;padding:6px 0;font-size:.95rem;align-self:flex-start}
 .spot{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;cursor:pointer;width:100%;text-align:left}
 .spot b{font-family:var(--f-head);font-size:1.1rem}
 
@@ -172,6 +198,9 @@ textarea{min-height:80px;resize:vertical}
   <span class="today num" id="today"></span>
 </header>
 
+<!-- ===== ログイン・新規登録（ログイン機能が設定されている時だけ使う） ===== -->
+<section id="auth" hidden></section>
+
 <main>
   <!-- ===== 今日の海（天気・潮） ===== -->
   <section class="view" id="v-umi">
@@ -186,8 +215,9 @@ textarea{min-height:80px;resize:vertical}
   <!-- ===== 釣果帳 ===== -->
   <section class="view" id="v-log" hidden>
     <button class="btn primary big-add" id="add-catch" type="button">＋ 釣果を記録する</button>
-    <div id="sample-banner" class="notice" hidden>
-      いまは見本データが入っています。<button class="btn" id="clear-sample" type="button" style="margin-left:6px">見本を消す</button>
+    <div id="migrate-banner" class="notice" hidden>
+      <span id="migrate-text"></span>
+      <div class="row" style="margin-top:8px"><button class="btn sea" id="migrate-go" type="button">アカウントに移す</button></div>
     </div>
     <input id="log-q" type="search" placeholder="魚の名前・場所で絞り込み" aria-label="絞り込み">
     <div id="log-list" class="list"></div>
@@ -195,17 +225,39 @@ textarea{min-height:80px;resize:vertical}
 
   <!-- ===== 釣り場マップ ===== -->
   <section class="view" id="v-map" hidden>
-    <div id="map"></div>
-    <p class="small muted" style="margin:0">地図をタップすると、その場所を釣り場として登録できます。</p>
+    <form class="row" id="map-search">
+      <input id="map-q" type="search" placeholder="地名で探す（例：城ヶ島）" aria-label="地名で探す" style="flex:1;min-width:0">
+      <button class="btn sea" type="submit">探す</button>
+    </form>
+    <div id="map-results" class="list" hidden></div>
+    <div class="seg" id="map-layers" role="group" aria-label="地図の種類">
+      <button type="button" data-layer="pale" aria-pressed="true">すっきり</button>
+      <button type="button" data-layer="std" aria-pressed="false">詳しい地図</button>
+      <button type="button" data-layer="photo" aria-pressed="false">航空写真</button>
+    </div>
+    <div class="map-wrap">
+      <div id="map"></div>
+      <div class="crosshair" id="crosshair" hidden></div>
+      <div class="map-btns">
+        <button class="mbtn" id="m-here" type="button">現在地</button>
+        <button class="mbtn" id="m-all" type="button">全部の釣り場</button>
+      </div>
+    </div>
+    <div id="add-bar" class="add-bar" hidden>
+      <p>地図を指で動かして、<b>赤い十字</b>を釣り場の位置に合わせてください。</p>
+      <div class="grid2"><button class="btn" id="add-cancel" type="button">やめる</button><button class="btn primary" id="add-here" type="button">ここを登録</button></div>
+    </div>
+    <button class="btn primary big-add" id="add-spot" type="button">＋ 釣り場を追加する</button>
     <div id="spot-list" class="list"></div>
   </section>
 
   <!-- ===== 成績 ===== -->
   <section class="view" id="v-stats" hidden>
     <div id="stats-body" class="view"></div>
+    <div class="card" id="acct-card" hidden></div>
     <div class="card">
       <h2>データのバックアップ</h2>
-      <p class="small muted" style="margin:0 0 10px">記録はこのスマホの中だけに保存されています。機種変更の前などに書き出しておくと安心です。</p>
+      <p class="small muted" style="margin:0 0 10px" id="backup-note">記録はこのスマホの中だけに保存されています。機種変更の前などに書き出しておくと安心です。</p>
       <div class="row">
         <button class="btn" id="btn-export" type="button">書き出す</button>
         <label class="btn" for="import-file" style="display:inline-flex;align-items:center">読み込む</label>
@@ -236,7 +288,10 @@ textarea{min-height:80px;resize:vertical}
   <option value="イナダ"><option value="ブリ"><option value="サヨリ"><option value="アイナメ"><option value="メジナ">
 </datalist>
 
-<script>
+<script type="module">
+// ログイン機能の設定（未設定なら null）
+import FIREBASE_CONFIG from './firebase-config.js';
+
 /* =========================================================
    0. 小さな道具
    ========================================================= */
@@ -252,39 +307,119 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
 function toast(msg){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2200); }
 
 /* =========================================================
-   1. データ保存（スマホの中の IndexedDB に保存）
-   catches = 釣果、spots = 釣り場
+   1. データ保存
+   ・ログイン機能が設定済み（firebase-config.js に設定あり）
+       → Firebase（Google のクラウド）にアカウントごとに保存。機種変更しても、別の端末でも同じ記録が見られる
+       → 電波が無い所で記録しても、スマホに一時保存され、電波が戻ると自動で送られる
+   ・未設定 → このスマホの中（IndexedDB）だけに保存
+   記録の形：catches = 釣果、spots = 釣り場、photos = 写真（大きいので別に保存。一覧には小さな thumb を使う）
    ========================================================= */
+let catches = [], spots = [];
+let S = null;          // いま使っている保存先（localStore か cloudStore）
+let fb = null, user = null;
+const spotById = id => spots.find(s => s.id === id);
+
+/* ---- 写真を縮める：一覧用の小さい画像（thumb）と、詳細用の画像（full）を作る ---- */
+async function resizeToDataUrl(src, maxSide, quality){
+  const img = await createImageBitmap(src);
+  const s = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const c = document.createElement('canvas'); c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', quality);
+}
+async function makePhoto(file){
+  let full = await resizeToDataUrl(file, 1280, 0.78);
+  if (full.length > 900000) full = await resizeToDataUrl(file, 960, 0.68);   // クラウドの1件あたりの上限（約1MB）に収める
+  return {full, thumb: await resizeToDataUrl(file, 240, 0.7)};
+}
+
+/* ---- スマホの中に保存（IndexedDB）---- */
 let dbp;
 function idb(){
   return dbp ||= new Promise((res, rej) => {
-    const r = indexedDB.open('tsuri-techo', 1);
-    r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('catches', {keyPath:'id'}); d.createObjectStore('spots', {keyPath:'id'}); };
+    const r = indexedDB.open('tsuri-techo', 2);
+    r.onupgradeneeded = () => { const d = r.result; for (const n of ['catches','spots','photos']) if (!d.objectStoreNames.contains(n)) d.createObjectStore(n, {keyPath:'id'}); };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   });
 }
 async function dbAll(store){ const d = await idb(); return new Promise((res, rej) => { const q = d.transaction(store).objectStore(store).getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+async function dbGet(store, id){ const d = await idb(); return new Promise((res, rej) => { const q = d.transaction(store).objectStore(store).get(id); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
 async function dbTx(store, fn){ const d = await idb(); return new Promise((res, rej) => { const tx = d.transaction(store, 'readwrite'); fn(tx.objectStore(store)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
-const dbPut = (store, v) => dbTx(store, s => s.put(v));
-const dbDel = (store, id) => dbTx(store, s => s.delete(id));
 
-let catches = [], spots = [];
-async function loadAll(){
-  [catches, spots] = await Promise.all([dbAll('catches'), dbAll('spots')]);
+const localStore = {
+  mode: 'local',
+  // 読み込み。ついでに、前の版で入れた見本データを消し、古い形式の写真を新しい形式に直す
+  async load(){
+    let [cs, ss] = await Promise.all([dbAll('catches'), dbAll('spots')]);
+    for (const c of cs.filter(c => c.sample)) await dbTx('catches', st => st.delete(c.id));
+    for (const s of ss.filter(s => s.sample)) await dbTx('spots', st => st.delete(s.id));
+    cs = cs.filter(c => !c.sample); ss = ss.filter(s => !s.sample);
+    for (const c of cs){
+      if (!(c.photo instanceof Blob)) continue;
+      try { const p = await makePhoto(c.photo); await dbTx('photos', st => st.put({id: c.id, data: p.full})); c.thumb = p.thumb; c.hasPhoto = true; } catch {}
+      delete c.photo; await dbTx('catches', st => st.put(c));
+    }
+    return {cs, ss};
+  },
+  async saveCatch(rec, photo){
+    if (photo){ await dbTx('photos', st => st.put({id: rec.id, data: photo.full})); rec.thumb = photo.thumb; rec.hasPhoto = true; }
+    else if (photo === false){ await dbTx('photos', st => st.delete(rec.id)); rec.thumb = null; rec.hasPhoto = false; }
+    await dbTx('catches', st => st.put(rec)); await reloadLocal();
+  },
+  async deleteCatch(id){ await dbTx('catches', st => st.delete(id)); await dbTx('photos', st => st.delete(id)); await reloadLocal(); },
+  async saveSpot(rec){ await dbTx('spots', st => st.put(rec)); await reloadLocal(); },
+  async deleteSpot(id){ await dbTx('spots', st => st.delete(id)); await reloadLocal(); },
+  async getPhoto(id){ return (await dbGet('photos', id))?.data || null; },
+  async clearAll(){ for (const n of ['catches','spots','photos']) await dbTx(n, st => st.clear()); },
+};
+async function reloadLocal(){ const {cs, ss} = await localStore.load(); catches = cs; spots = ss; onData(); }
+
+/* ---- クラウドに保存（Firebase）---- */
+async function initFirebase(){
+  const base = 'https://www.gstatic.com/firebasejs/10.14.1/';
+  const [appM, A, F] = await Promise.all([import(base + 'firebase-app.js'), import(base + 'firebase-auth.js'), import(base + 'firebase-firestore.js')]);
+  const app = appM.initializeApp(FIREBASE_CONFIG);
+  const auth = A.getAuth(app); auth.languageCode = 'ja';
+  let db;
+  // スマホにも記録を置いておく設定（電波が無くても見られる・書ける）
+  try { db = F.initializeFirestore(app, {localCache: F.persistentLocalCache({tabManager: F.persistentMultipleTabManager()})}); }
+  catch { db = F.getFirestore(app); }
+  fb = {auth, db, A, F};
+}
+const userCol = name => fb.F.collection(fb.db, 'users', user.uid, name);
+const userDoc = (name, id) => fb.F.doc(fb.db, 'users', user.uid, name, id);
+const plain = o => JSON.parse(JSON.stringify(o));   // クラウドに送れない値（undefined など）を取り除く
+const sent = p => p.catch(e => { console.error(e); toast('保存できませんでした。通信状態を確かめて、もう一度お試しください'); });
+let unsubs = [];
+function listenCloud(){
+  unsubs.forEach(u => u()); unsubs = [];
+  const fail = e => { console.error(e); toast('記録を読み込めませんでした'); };
+  // onSnapshot：クラウドの記録が変わるたびに自動で呼ばれる（別の端末で記録しても反映される）
+  unsubs.push(fb.F.onSnapshot(userCol('catches'), snap => { catches = snap.docs.map(d => d.data()); onData(); }, fail));
+  unsubs.push(fb.F.onSnapshot(userCol('spots'), snap => { spots = snap.docs.map(d => d.data()); onData(); }, fail));
+}
+const cloudStore = {
+  mode: 'cloud',
+  // 書き込みは待たずに進める（電波が無くても画面はすぐ更新され、送信は後で自動で行われる）
+  async saveCatch(rec, photo){
+    if (photo){ rec.thumb = photo.thumb; rec.hasPhoto = true; sent(fb.F.setDoc(userDoc('photos', rec.id), {id: rec.id, data: photo.full})); }
+    else if (photo === false){ rec.thumb = null; rec.hasPhoto = false; sent(fb.F.deleteDoc(userDoc('photos', rec.id))); }
+    sent(fb.F.setDoc(userDoc('catches', rec.id), plain(rec)));
+  },
+  async deleteCatch(id){ sent(fb.F.deleteDoc(userDoc('catches', id))); sent(fb.F.deleteDoc(userDoc('photos', id))); },
+  async saveSpot(rec){ sent(fb.F.setDoc(userDoc('spots', rec.id), plain(rec))); },
+  async deleteSpot(id){ sent(fb.F.deleteDoc(userDoc('spots', id))); },
+  async getPhoto(id){ try { const s = await fb.F.getDoc(userDoc('photos', id)); return s.exists() ? s.data().data : null; } catch { return null; } },
+};
+
+/* 記録が変わったら、いま開いている画面を描き直す */
+function onData(){
   catches.forEach(c => c.tide = tideInfo(c.at).name);   // 潮回りはいつも最新の計算方法で付け直す
+  if (currentTab === 'log') renderLog();
+  else if (currentTab === 'map') renderMap();
+  else if (currentTab === 'stats') renderStats();
+  else renderPlaceSelect();
 }
-const spotById = id => spots.find(s => s.id === id);
-
-/* 写真は大きすぎると容量を食うので、長い辺1200pxに縮めて保存 */
-async function shrink(file){
-  const img = await createImageBitmap(file);
-  const s = Math.min(1, 1200 / Math.max(img.width, img.height));
-  const c = document.createElement('canvas'); c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
-  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-  return new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
-}
-const urlCache = new Map();
-function photoUrl(c){ if (!c.photo) return null; if (!urlCache.has(c.id)) urlCache.set(c.id, URL.createObjectURL(c.photo)); return urlCache.get(c.id); }
 
 /* =========================================================
    2. 潮回り（大潮・中潮…）を「本当の新月の時刻」から計算
@@ -607,20 +742,20 @@ function catchForm(c){
       </div>
       <label class="field"><span>日時</span><input id="cf-at" type="datetime-local" required value="${esc(c.at)}"></label>
       <label class="field"><span>釣り場</span><select id="cf-spot">${spotOpts}</select></label>
-      ${spots.length ? '' : '<p class="small muted" style="margin:-6px 0 0">釣り場は「釣り場」タブの地図から登録できます。</p>'}
+      ${spots.length ? '' : '<p class="small muted" style="margin:-6px 0 0">釣り場は「釣り場」タブで登録できます。</p>'}
       <label class="field"><span>釣り方・エサ</span><input id="cf-method" value="${esc(c.method)}" placeholder="例：サビキ／アミエビ"></label>
       <label class="field"><span>メモ</span><textarea id="cf-memo" placeholder="例：朝マヅメに群れが回ってきた">${esc(c.memo)}</textarea></label>
       <label class="field"><span>写真</span><input id="cf-photo" type="file" accept="image/*"></label>
-      ${c.photo ? `<label class="row small"><input type="checkbox" id="cf-rmphoto" style="width:auto;min-height:0"> 今の写真を消す</label>` : ''}
+      ${c.hasPhoto ? `<label class="row small"><input type="checkbox" id="cf-rmphoto" style="width:auto;min-height:0"> 今の写真を消す</label>` : ''}
       <button class="btn primary block" type="submit">保存する</button>
     </form>`, b => {
     b.querySelector('#cf').addEventListener('submit', async e => {
       e.preventDefault();
       const btn = e.target.querySelector('[type=submit]'); btn.disabled = true; btn.textContent = '保存中…';
       const file = b.querySelector('#cf-photo').files[0];
-      let photo = c.photo || null;
-      if (b.querySelector('#cf-rmphoto')?.checked) photo = null;
-      if (file){ try { photo = await shrink(file); } catch { toast('写真を読み込めませんでした'); } }
+      let photo;                                            // undefined = 写真はそのまま
+      if (b.querySelector('#cf-rmphoto')?.checked) photo = false;
+      if (file){ try { photo = await makePhoto(file); } catch { toast('写真を読み込めませんでした'); } }
       const at = b.querySelector('#cf-at').value, spotId = b.querySelector('#cf-spot').value;
       const rec = {
         ...c, id: c.id || uid(), at, spotId,
@@ -630,11 +765,10 @@ function catchForm(c){
         count: Math.max(1, +b.querySelector('#cf-count').value || 1),
         method: b.querySelector('#cf-method').value.trim(),
         memo: b.querySelector('#cf-memo').value.trim(),
-        photo, tide: tideInfo(at).name,
+        tide: tideInfo(at).name,
       };
-      if (!isNew) urlCache.delete(rec.id);
-      await dbPut('catches', rec); await loadAll();
-      closeSheet(); toast(isNew ? '記録しました' : '直しました'); renderLog();
+      try { await S.saveCatch(rec, photo); } catch { btn.disabled = false; btn.textContent = '保存する'; return toast('保存できませんでした'); }
+      closeSheet(); toast(isNew ? '記録しました' : '直しました');
     });
   });
 }
@@ -642,9 +776,8 @@ $('#add-catch').addEventListener('click', () => catchForm());
 
 function catchDetail(id){
   const c = catches.find(x => x.id === id); if (!c) return;
-  const u = photoUrl(c);
   openSheet(`${sheetHead(c.fish + (c.count > 1 ? ` ×${c.count}` : ''))}
-    ${u ? `<img class="photo-big" src="${u}" alt="">` : ''}
+    ${c.thumb ? `<img class="photo-big" id="cd-photo" src="${esc(c.thumb)}" alt="">` : ''}
     <dl class="dl">
       <dt>日時</dt><dd class="num">${fmtDate(c.at)} ${esc(c.at.slice(11,16))}</dd>
       <dt>大きさ</dt><dd class="num">${c.size != null ? esc(c.size) + ' cm' : '—'}</dd>
@@ -654,32 +787,31 @@ function catchDetail(id){
       <dt>メモ</dt><dd style="white-space:pre-wrap">${esc(c.memo || '—')}</dd>
     </dl>
     <div class="grid2"><button class="btn" id="cd-edit" type="button">直す</button><button class="btn danger" id="cd-del" type="button">削除</button></div>`, b => {
+    // まず小さい写真を出し、大きい写真が届いたら差し替える
+    if (c.hasPhoto) S.getPhoto(c.id).then(u => { const img = b.querySelector('#cd-photo'); if (u && img && u.startsWith('data:image/')) img.src = u; });
     b.querySelector('#cd-edit').onclick = () => catchForm(c);
     const del = b.querySelector('#cd-del');
     del.onclick = async () => {
       if (!del.dataset.sure){ del.dataset.sure = 1; del.textContent = 'もう一度押すと削除'; return; }
-      await dbDel('catches', c.id); await loadAll(); closeSheet(); toast('削除しました'); renderLog();
+      await S.deleteCatch(c.id); closeSheet(); toast('削除しました');
     };
   });
 }
 
 function renderLog(){
-  $('#sample-banner').hidden = !catches.some(c => c.sample);
   const q = $('#log-q').value.trim();
   const list = catches.filter(c => !q || (c.fish + (spotById(c.spotId)?.name || c.spotName || '')).includes(q)).sort((a,b) => b.at.localeCompare(a.at));
   const box = $('#log-list');
   if (!catches.length){
-    box.innerHTML = `<div class="card empty"><h3>まだ釣果がありません</h3><p style="margin:0 0 12px">上の「釣果を記録する」から、釣れた魚を登録しましょう。写真も残せます。</p><button class="btn" id="load-sample" type="button">見本データで試してみる</button></div>`;
-    $('#load-sample').onclick = loadSample; return;
+    box.innerHTML = `<div class="card empty"><h3>まだ釣果がありません</h3><p style="margin:0">上の「釣果を記録する」から、釣れた魚を登録しましょう。写真も残せます。</p></div>`; return;
   }
   if (!list.length){ box.innerHTML = `<div class="card empty">「${esc(q)}」に当てはまる記録はありません。</div>`; return; }
   let html = '', lastMonth = '';
   for (const c of list){
     const mo = c.at.slice(0,7);
     if (mo !== lastMonth){ html += `<div class="month-h">${+mo.slice(0,4)}年${+mo.slice(5)}月</div>`; lastMonth = mo; }
-    const u = photoUrl(c);
     html += `<button class="catch" type="button" data-id="${esc(c.id)}">
-      ${u ? `<img class="thumb" src="${u}" alt="">` : `<span class="thumb">${esc(c.fish.slice(0,1))}</span>`}
+      ${c.thumb ? `<img class="thumb" src="${esc(c.thumb)}" alt="">` : `<span class="thumb">${esc(c.fish.slice(0,1))}</span>`}
       <span class="info">
         <span class="fish">${esc(c.fish)}${c.count > 1 ? ` <span class="small muted">×${c.count}</span>` : ''}${c.size != null ? ` <span class="small num">${esc(c.size)}cm</span>` : ''}</span>
         <span class="meta num">${fmtDate(c.at)} ${esc(c.at.slice(11,16))}　<span class="chip">${esc(c.tide)}</span></span>
@@ -691,31 +823,114 @@ function renderLog(){
 }
 $('#log-q').addEventListener('input', renderLog);
 
+/* ログイン前にこのスマホへ保存していた記録を、アカウントに移す */
+let pendingLocal = null;
+async function checkMigration(){
+  pendingLocal = null; $('#migrate-banner').hidden = true;
+  try { const {cs, ss} = await localStore.load(); if (cs.length || ss.length) pendingLocal = {cs, ss}; } catch { return; }
+  if (!pendingLocal) return;
+  $('#migrate-text').textContent = `このスマホに、ログイン前に記録した釣果 ${pendingLocal.cs.length}件・釣り場 ${pendingLocal.ss.length}件があります。`;
+  $('#migrate-banner').hidden = false;
+}
+$('#migrate-go').addEventListener('click', async () => {
+  if (!pendingLocal || S.mode !== 'cloud') return;
+  const btn = $('#migrate-go'); btn.disabled = true; btn.textContent = '移しています…';
+  for (const s of pendingLocal.ss) await S.saveSpot(s);
+  for (const c of pendingLocal.cs){
+    const full = c.hasPhoto ? await localStore.getPhoto(c.id) : null;
+    await S.saveCatch({...c}, full ? {full, thumb: c.thumb} : undefined);
+  }
+  await localStore.clearAll(); pendingLocal = null;
+  $('#migrate-banner').hidden = true; btn.disabled = false; btn.textContent = 'アカウントに移す';
+  toast('アカウントに移しました');
+});
+
 /* =========================================================
-   7. 釣り場マップ（国土地理院の地図を使用）
+   7. 釣り場マップ（国土地理院の地図）
+   ・「すっきり」＝淡色地図（余計な色が少なく、海と陸の境目が見やすい）
+   ・「詳しい地図」＝標準地図　・「航空写真」＝堤防や磯の形がそのまま見える
+   ・釣り場は「十字を合わせて登録」方式（地図を動かしただけで登録画面が出ないように）
    ========================================================= */
-let markerLayer;
+const GSI = '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>';
+const TILE = {
+  pale:  'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png',
+  std:   'https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png',
+  photo: 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+};
+let markerLayer, baseLayer, hereMarker, adding = false;
+function setLayer(name){
+  if (!TILE[name]) name = 'pale';
+  if (baseLayer) map.removeLayer(baseLayer);
+  baseLayer = L.tileLayer(TILE[name], {maxZoom: 19, maxNativeZoom: 18, attribution: GSI, className: 'tiles-' + name}).addTo(map);
+  document.querySelectorAll('#map-layers button').forEach(b => b.setAttribute('aria-pressed', b.dataset.layer === name));
+  lsSet('mapLayer', name);
+}
+function fitAll(){
+  if (!spots.length) return map.setView([DEFAULT_PLACE.lat, DEFAULT_PLACE.lng], 11);
+  map.fitBounds(L.latLngBounds(spots.map(s => [s.lat, s.lng])), {padding: [50, 50], maxZoom: 15});
+}
 function renderMap(){
   if (!window.L){ $('#map').innerHTML = '<div class="empty">地図を読み込めませんでした。電波の良い所で開き直してください。</div>'; renderSpotList(); return; }
   if (!map){
-    const c = spots[0] || DEFAULT_PLACE;
-    map = L.map('map', {zoomControl: true}).setView([c.lat, c.lng], spots.length ? 12 : 10);
-    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {maxZoom: 18, attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>'}).addTo(map);
+    map = L.map('map', {zoomControl: true});
+    setLayer(lsGet('mapLayer') || 'pale');
     markerLayer = L.layerGroup().addTo(map);
-    map.on('click', e => spotForm({lat: +e.latlng.lat.toFixed(5), lng: +e.latlng.lng.toFixed(5)}));
+    fitAll();
   }
   setTimeout(() => map.invalidateSize(), 50);
   markerLayer.clearLayers();
-  const icon = L.divIcon({className: '', html: '<div class="bobber"></div>', iconSize: [26,26], iconAnchor: [13,13]});
-  for (const s of spots) L.marker([s.lat, s.lng], {icon, title: s.name}).addTo(markerLayer).on('click', () => spotDetail(s.id));
+  for (const s of spots){
+    const icon = L.divIcon({className: '', html: `<div class="pin"><div class="bobber"></div><span class="pin-label">${esc(s.name)}</span></div>`, iconSize: [30,30], iconAnchor: [15,15]});
+    L.marker([s.lat, s.lng], {icon, title: s.name}).addTo(markerLayer).on('click', () => { if (!adding) spotDetail(s.id); });
+  }
   renderSpotList();
 }
+document.querySelectorAll('#map-layers button').forEach(b => b.addEventListener('click', () => setLayer(b.dataset.layer)));
+$('#m-all').addEventListener('click', fitAll);
+$('#m-here').addEventListener('click', () => {
+  if (!navigator.geolocation) return toast('この端末では現在地が使えません');
+  toast('現在地を調べています…');
+  navigator.geolocation.getCurrentPosition(pos => {
+    const ll = [pos.coords.latitude, pos.coords.longitude];
+    if (hereMarker) hereMarker.remove();
+    hereMarker = L.marker(ll, {icon: L.divIcon({className: '', html: '<div class="here-dot"></div>', iconSize: [18,18], iconAnchor: [9,9]}), interactive: false}).addTo(map);
+    map.setView(ll, 15);
+  }, () => toast('現在地を取得できませんでした（位置情報の許可を確認してください）'), {timeout: 10000, enableHighAccuracy: true});
+});
+// 地名検索（国土地理院の地名検索サービス）
+$('#map-search').addEventListener('submit', async e => {
+  e.preventDefault();
+  const q = $('#map-q').value.trim(), box = $('#map-results'); if (!q) return;
+  box.hidden = false; box.innerHTML = '<div class="card muted">探しています…</div>';
+  try {
+    const r = await fetch('https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(q));
+    const items = (await r.json()).slice(0, 8);
+    if (!items.length){ box.innerHTML = '<div class="card muted">見つかりませんでした。別の言い方でお試しください。</div>'; return; }
+    box.innerHTML = items.map((it, i) => `<button class="spot" type="button" data-i="${i}"><span>${esc(it.properties.title)}</span><span class="small muted">移動</span></button>`).join('')
+      + '<button class="linkbtn" type="button" id="map-results-close">閉じる</button>';
+    box.querySelectorAll('.spot').forEach(el => el.onclick = () => {
+      const [lng, lat] = items[+el.dataset.i].geometry.coordinates; map.setView([lat, lng], 15);
+      box.hidden = true; $('.map-wrap').scrollIntoView({block: 'start'});
+    });
+    $('#map-results-close').onclick = () => box.hidden = true;
+  } catch { box.innerHTML = '<div class="card muted">検索できませんでした。電波の良い所でお試しください。</div>'; }
+});
+// 釣り場の追加：十字を出して、地図を動かして位置を合わせてもらう
+function setAdding(on){
+  adding = on;
+  $('#crosshair').hidden = !on; $('#add-bar').hidden = !on; $('#add-spot').hidden = on;
+  if (on){ $('.map-wrap').scrollIntoView({block: 'start', behavior: 'smooth'}); toast('地図を動かして十字を合わせてください'); }
+}
+$('#add-spot').addEventListener('click', () => setAdding(true));
+$('#add-cancel').addEventListener('click', () => setAdding(false));
+$('#add-here').addEventListener('click', () => { const c = map.getCenter(); setAdding(false); spotForm({lat: +c.lat.toFixed(5), lng: +c.lng.toFixed(5)}); });
+
 function spotStats(id){ const cs = catches.filter(c => c.spotId === id); return {n: cs.reduce((a,c) => a + c.count, 0), days: new Set(cs.map(c => c.at.slice(0,10))).size}; }
 function renderSpotList(){
   const box = $('#spot-list');
-  if (!spots.length){ box.innerHTML = `<div class="card empty"><h3>釣り場が未登録です</h3><p style="margin:0">よく行く釣り場を地図でタップして登録しましょう。登録すると、その場所の天気と潮が見られます。</p></div>`; return; }
+  if (!spots.length){ box.innerHTML = `<div class="card empty"><h3>釣り場が未登録です</h3><p style="margin:0">上の「釣り場を追加する」から、よく行く釣り場を登録しましょう。登録すると、その場所の天気と潮が見られます。</p></div>`; return; }
   box.innerHTML = spots.map(s => { const st = spotStats(s.id); return `<button class="spot" type="button" data-id="${esc(s.id)}"><span><b>${esc(s.name)}</b><br><span class="small muted">${esc(s.memo || '')}</span></span><span class="num small muted" style="white-space:nowrap">${st.days}回 / ${st.n}匹</span></button>`; }).join('');
-  box.querySelectorAll('.spot').forEach(el => el.onclick = () => { const s = spotById(el.dataset.id); map && map.setView([s.lat, s.lng], 14); spotDetail(s.id); });
+  box.querySelectorAll('.spot').forEach(el => el.onclick = () => { const s = spotById(el.dataset.id); if (map) map.setView([s.lat, s.lng], 15); spotDetail(s.id); });
 }
 function spotForm(s){
   const isNew = !s.id;
@@ -729,7 +944,7 @@ function spotForm(s){
     b.querySelector('#sf').addEventListener('submit', async e => {
       e.preventDefault();
       const rec = {...s, id: s.id || uid(), name: b.querySelector('#sf-name').value.trim(), memo: b.querySelector('#sf-memo').value.trim()};
-      await dbPut('spots', rec); await loadAll(); closeSheet(); toast('保存しました'); renderMap();
+      await S.saveSpot(rec); closeSheet(); toast('保存しました');
     });
   });
 }
@@ -747,7 +962,7 @@ function spotDetail(id){
     const del = b.querySelector('#sd-del');
     del.onclick = async () => {
       if (!del.dataset.sure){ del.dataset.sure = 1; del.textContent = 'もう一度押すと削除'; return; }
-      await dbDel('spots', s.id); await loadAll(); closeSheet(); toast('削除しました（釣果の記録は残ります）'); renderMap();
+      await S.deleteSpot(s.id); closeSheet(); toast('削除しました（釣果の記録は残ります）');
     };
   });
 }
@@ -760,6 +975,7 @@ function bars(entries, fmt){
   return `<div class="bars">${entries.map(([k,v,sub]) => `<div class="bar"><span class="bar-k">${esc(k)}</span><span class="bar-track"><span class="bar-fill" style="width:${(v/max*100).toFixed(1)}%"></span></span><span class="bar-v">${fmt(v, sub)}</span></div>`).join('')}</div>`;
 }
 function renderStats(){
+  renderAccount();
   const box = $('#stats-body');
   if (!catches.length){ box.innerHTML = `<div class="card empty"><h3>まだ集計する記録がありません</h3><p style="margin:0">釣果を記録すると、ここに魚の種類別・潮回り別の成績が出ます。</p></div>`; return; }
   const total = catches.reduce((a,c) => a + c.count, 0);
@@ -794,14 +1010,30 @@ function renderStats(){
     <div class="card"><h2>月ごとの匹数</h2>${bars(monthE, v => v + '匹')}</div>
     ${bestRows ? `<div class="card"><h2>魚ごとの自己ベスト</h2><div class="bars">${bestRows}</div></div>` : ''}`;
 }
+function renderAccount(){
+  const card = $('#acct-card');
+  if (S?.mode !== 'cloud' || !user){ card.hidden = true; return; }
+  card.hidden = false;
+  card.innerHTML = `<h2>アカウント</h2>
+    <p style="margin:0"><b>${esc(user.displayName || 'お名前未設定')}</b> さん</p>
+    <p class="small muted" style="margin:0 0 12px">${esc(user.email)}</p>
+    <button class="btn" id="btn-logout" type="button">ログアウト</button>`;
+  $('#btn-logout').onclick = async () => {
+    const b = $('#btn-logout');
+    if (!b.dataset.sure){ b.dataset.sure = 1; b.textContent = 'もう一度押すとログアウト'; return; }
+    await fb.A.signOut(fb.auth);
+  };
+  $('#backup-note').textContent = '記録はアカウントに保存されているので、スマホを替えてもログインすれば見られます。念のため、ファイルに書き出しておくこともできます。';
+}
 
 /* =========================================================
    9. バックアップ（書き出し・読み込み）
    ========================================================= */
-const blobToData = b => new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); });
 $('#btn-export').addEventListener('click', async () => {
-  const cs = await Promise.all(catches.map(async c => ({...c, photo: c.photo ? await blobToData(c.photo) : null})));
-  const blob = new Blob([JSON.stringify({app:'tsuri-techo', v:1, spots, catches: cs})], {type:'application/json'});
+  toast('書き出しの準備をしています…');
+  const cs = [];
+  for (const c of catches) cs.push({...c, photo: c.hasPhoto ? await S.getPhoto(c.id) : null});
+  const blob = new Blob([JSON.stringify({app:'tsuri-techo', v:2, spots, catches: cs})], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   const d = new Date(); a.download = `釣り手帳_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.json`;
   document.body.appendChild(a); a.click(); a.remove(); toast('書き出しました');
@@ -811,45 +1043,122 @@ $('#import-file').addEventListener('change', async e => {
   try {
     const data = JSON.parse(await f.text());
     if (data.app !== 'tsuri-techo') throw 0;
-    for (const s of data.spots || []) await dbPut('spots', s);
-    for (const c of data.catches || []) await dbPut('catches', {...c, photo: c.photo ? await (await fetch(c.photo)).blob() : null});
-    urlCache.clear(); await loadAll(); toast('読み込みました'); renderStats();
+    for (const s of data.spots || []) await S.saveSpot(s);
+    for (const c of data.catches || []){
+      const {photo, ...rec} = c; let p;
+      if (typeof photo === 'string' && photo.startsWith('data:image/')){ try { p = await makePhoto(await (await fetch(photo)).blob()); } catch {} }
+      await S.saveCatch(rec, p);
+    }
+    toast('読み込みました');
   } catch { toast('このファイルは読み込めませんでした'); }
   e.target.value = '';
 });
 
 /* =========================================================
-   10. 見本データ（お試し用。いつでも消せる）
+   10. ログイン・新規登録（Firebase Authentication）
+   パスワードは Firebase が安全に管理し、このアプリやほかの人が見ることはできない
    ========================================================= */
-async function loadSample(){
-  const s1 = {id:'smp-s1', name:'本牧の海釣り施設', memo:'駐車場あり。朝マヅメが狙い目', lat:35.4106, lng:139.6830, sample:true};
-  const s2 = {id:'smp-s2', name:'城ヶ島の磯', memo:'足元すべるので磯靴で', lat:35.1349, lng:139.6178, sample:true};
-  const ago = (d, hm) => { const t = new Date(); t.setDate(t.getDate() - d); return `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}T${hm}`; };
-  const rows = [
-    [3,'06:10','アジ',18,24,'サビキ／アミエビ',s1], [3,'07:40','イワシ',12,15,'サビキ／アミエビ',s1],
-    [17,'16:30','カサゴ',22,3,'ブラクリ／サバの切り身',s2], [17,'17:20','メバル',19,2,'ウキ釣り／青イソメ',s2],
-    [31,'09:00','シロギス',21,6,'ちょい投げ／石ゴカイ',s1], [52,'05:50','クロダイ',41,1,'ウキフカセ／オキアミ',s2],
-    [66,'06:30','アジ',21,12,'サビキ／アミエビ',s1], [80,'14:00','ハゼ',13,20,'ミャク釣り／青イソメ',s1],
-  ];
-  await dbPut('spots', s1); await dbPut('spots', s2);
-  for (const [d,hm,fish,size,count,method,sp] of rows){ const at = ago(d,hm); await dbPut('catches', {id:'smp-'+uid(), at, fish, size, count, method, memo:'（見本データ）', spotId:sp.id, spotName:sp.name, photo:null, tide:tideInfo(at).name, sample:true}); }
-  await loadAll(); toast('見本データを入れました'); renderLog();
+function authMsg(e){
+  const c = e?.code || '';
+  return ({
+    'auth/invalid-email': 'メールアドレスの形が正しくありません。',
+    'auth/missing-password': 'パスワードを入力してください。',
+    'auth/invalid-credential': 'メールアドレスかパスワードが違います。',
+    'auth/wrong-password': 'メールアドレスかパスワードが違います。',
+    'auth/user-not-found': 'このメールアドレスは登録されていません。',
+    'auth/email-already-in-use': 'このメールアドレスはすでに登録されています。「ログイン」から入ってください。',
+    'auth/weak-password': 'パスワードは6文字以上にしてください。',
+    'auth/too-many-requests': '何度も失敗したため、しばらく待ってからお試しください。',
+    'auth/network-request-failed': '通信できませんでした。電波の良い所でお試しください。',
+    'auth/operation-not-allowed': 'ログイン機能の設定がまだ終わっていません。',
+  })[c] || `うまくいきませんでした（${c || '不明なエラー'}）`;
 }
-$('#clear-sample').addEventListener('click', async () => {
-  for (const c of catches.filter(c => c.sample)) await dbDel('catches', c.id);
-  for (const s of spots.filter(s => s.sample)) await dbDel('spots', s.id);
-  if (spots.some(s => s.sample && s.id === umi.placeId)) umi.placeId = 'default';
-  await loadAll(); toast('見本データを消しました'); renderLog();
-});
+function renderAuth(mode){
+  const box = $('#auth');
+  const tabs = `<div class="seg" style="grid-template-columns:1fr 1fr">
+      <button type="button" data-m="login" aria-pressed="${mode === 'login'}">ログイン</button>
+      <button type="button" data-m="signup" aria-pressed="${mode === 'signup'}">新規登録</button></div>`;
+  const forms = {
+    login: `<form id="af" class="card view" style="gap:12px">
+        <label class="field"><span>メールアドレス</span><input id="a-email" type="email" autocomplete="email" required></label>
+        <label class="field"><span>パスワード</span><input id="a-pass" type="password" autocomplete="current-password" required></label>
+        <p class="err" id="a-err" hidden></p>
+        <button class="btn primary block" type="submit">ログイン</button>
+        <button class="linkbtn" type="button" id="a-forgot">パスワードを忘れたとき</button>
+      </form>`,
+    signup: `<form id="af" class="card view" style="gap:12px">
+        <label class="field"><span>お名前（アプリの中で表示されます）</span><input id="a-name" autocomplete="nickname" required placeholder="例：とうちゃん"></label>
+        <label class="field"><span>メールアドレス</span><input id="a-email" type="email" autocomplete="email" required></label>
+        <label class="field"><span>パスワード（6文字以上）</span><input id="a-pass" type="password" autocomplete="new-password" minlength="6" required></label>
+        <label class="field"><span>パスワード（確認のためもう一度）</span><input id="a-pass2" type="password" autocomplete="new-password" minlength="6" required></label>
+        <p class="err" id="a-err" hidden></p>
+        <button class="btn primary block" type="submit">登録してはじめる</button>
+      </form>`,
+    reset: `<form id="af" class="card view" style="gap:12px">
+        <p style="margin:0">登録したメールアドレスに、パスワードを決め直すためのメールを送ります。</p>
+        <label class="field"><span>メールアドレス</span><input id="a-email" type="email" autocomplete="email" required></label>
+        <p class="err" id="a-err" hidden></p><p class="ok-msg" id="a-ok" hidden></p>
+        <button class="btn primary block" type="submit">メールを送る</button>
+        <button class="linkbtn" type="button" id="a-back">ログインに戻る</button>
+      </form>`,
+  };
+  box.innerHTML = `<h2 style="font-size:1.4rem">${mode === 'signup' ? 'はじめての方' : mode === 'reset' ? 'パスワードの再設定' : 'おかえりなさい'}</h2>
+    <p class="lead">記録はアカウントごとに保存されます。スマホを替えても、ログインすれば同じ記録が見られます。</p>
+    ${mode === 'reset' ? '' : tabs}${forms[mode]}`;
+  box.querySelectorAll('[data-m]').forEach(b => b.onclick = () => renderAuth(b.dataset.m));
+  box.querySelector('#a-forgot')?.addEventListener('click', () => renderAuth('reset'));
+  box.querySelector('#a-back')?.addEventListener('click', () => renderAuth('login'));
+  const err = box.querySelector('#a-err'), showErr = m => { err.textContent = m; err.hidden = !m; };
+  box.querySelector('#af').addEventListener('submit', async e => {
+    e.preventDefault(); showErr('');
+    const btn = e.target.querySelector('[type=submit]'), label = btn.textContent;
+    const email = box.querySelector('#a-email').value.trim(), pass = box.querySelector('#a-pass')?.value;
+    if (mode === 'signup' && pass !== box.querySelector('#a-pass2').value) return showErr('確認用のパスワードが一致しません。');
+    btn.disabled = true; btn.textContent = 'お待ちください…';
+    try {
+      if (mode === 'login') await fb.A.signInWithEmailAndPassword(fb.auth, email, pass);
+      if (mode === 'signup'){
+        const cred = await fb.A.createUserWithEmailAndPassword(fb.auth, email, pass);
+        await fb.A.updateProfile(cred.user, {displayName: box.querySelector('#a-name').value.trim()});
+        renderAccount();
+      }
+      if (mode === 'reset'){
+        await fb.A.sendPasswordResetEmail(fb.auth, email);
+        const ok = box.querySelector('#a-ok'); ok.textContent = 'メールを送りました。届かないときは迷惑メールのフォルダも見てください。'; ok.hidden = false;
+      }
+    } catch (ex) { showErr(authMsg(ex)); }
+    btn.disabled = false; btn.textContent = label;
+  });
+}
+function signedIn(){
+  document.body.classList.remove('signed-out'); $('#auth').hidden = true;
+  listenCloud(); showTab(currentTab || 'umi'); checkMigration();
+}
+function signedOut(){
+  unsubs.forEach(u => u()); unsubs = []; catches = []; spots = [];
+  document.body.classList.add('signed-out'); $('#auth').hidden = false;
+  renderAuth('login'); window.scrollTo(0, 0);
+}
 
 /* =========================================================
    11. 起動
    ========================================================= */
 (async function start(){
   const d = new Date(); $('#today').textContent = `${d.getMonth()+1}月${d.getDate()}日 ${tideInfo(`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`).name}`;
-  try { await loadAll(); }
-  catch { toast('このブラウザでは記録を保存できません（プライベートモードを解除してください）'); }
-  showTab('umi');
+  if (FIREBASE_CONFIG){
+    // ログイン機能あり：ログイン状態が分かるまでは何も出さない
+    document.body.classList.add('signed-out');
+    try { await initFirebase(); }
+    catch { $('#auth').hidden = false; $('#auth').innerHTML = '<div class="card">ログイン機能を読み込めませんでした。電波の良い所で開き直してください。</div>'; return; }
+    S = cloudStore;
+    fb.A.onAuthStateChanged(fb.auth, u => { user = u; u ? signedIn() : signedOut(); });
+  } else {
+    // ログイン機能なし：このスマホの中に保存
+    S = localStore;
+    try { await reloadLocal(); }
+    catch { toast('このブラウザでは記録を保存できません（プライベートモードを解除してください）'); }
+    showTab('umi');
+  }
 })();
 </script>
 </body>
