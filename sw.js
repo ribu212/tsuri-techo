@@ -3,7 +3,7 @@
    ・アプリ本体と天気は「ネット優先」：つながれば最新、つながらなければ前回の内容を出す
    ・ライブラリや潮位表など変わらないファイルは「保存したもの優先」で速く開く
    ・ログインや記録の送受信（Firebase）、地図の画像には手を出さない */
-const CACHE = 'tsuri-techo-v5';
+const CACHE = 'tsuri-techo-v6';
 const SHELL = ['./', './index.html', './firebase-config.js', './manifest.webmanifest', './data/muni.json', './tide/stations.json', './icons/icon-192.png'];
 const CDN = ['https://cdnjs.cloudflare.com/', 'https://www.gstatic.com/firebasejs/', 'https://fonts.googleapis.com/', 'https://fonts.gstatic.com/'];
 

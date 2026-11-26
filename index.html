@@ -113,6 +113,11 @@ textarea{min-height:80px;resize:vertical}
 .hour .rain{font-size:.78rem;color:var(--sea)}
 .hour .wind{font-size:.78rem}
 .hour .arrow{display:inline-block}
+.lv{font-weight:900;font-size:.95rem;line-height:1.2}
+.lv2{color:var(--ok)} .lv1{color:var(--sea)} .lv0{color:var(--muted)}
+.lv.big{font-size:1.8rem}
+.best{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.best-time{font-family:var(--f-head);font-size:1.7rem;font-weight:900}
 .hour.strong .wind{color:var(--float);font-weight:700}
 .tide-svg{width:100%;height:auto;display:block}
 .extremes{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
@@ -755,13 +760,9 @@ async function renderUmi(){
   if (rainSum >= 10) notes.push(`まとまった雨の予報です（1日 ${rainSum.toFixed(0)}mm）。雨具を忘れずに。`);
   else if (rainSum >= 1) notes.push(`雨が降る時間がありそうです（1日 ${rainSum.toFixed(1)}mm）。下の1時間ごとの予報で確認を。`);
 
-  // 1時間ごとの天気
-  let hours = '';
-  W.hourly.time.forEach((t, i) => {
-    if (!t.startsWith(dayStr)) return;
-    const [, ic] = wx(W.hourly.weather_code[i]); const ws = W.hourly.wind_speed_10m[i] ?? 0, wd = W.hourly.wind_direction_10m[i];
-    hours += `<div class="hour${ws >= 7 ? ' strong' : ''}" data-h="${+t.slice(11,13)}"><div class="t">${+t.slice(11,13)}時</div><div class="i">${ic}</div><div>${Math.round(W.hourly.temperature_2m[i])}°</div><div class="rain">${W.hourly.precipitation[i] > 0 ? '☂' + W.hourly.precipitation[i].toFixed(1) + 'mm' : '雨なし'}</div><div class="wind"><span class="arrow" style="transform:rotate(${wd}deg)">↓</span>${ws.toFixed(0)}m</div></div>`;
-  });
+  // 1時間ごとの天気（あとで「おすすめ度」を付けて並べる）
+  const hrs = [];
+  W.hourly.time.forEach((t, i) => { if (t.startsWith(dayStr)) hrs.push({h: +t.slice(11,13), code: W.hourly.weather_code[i], temp: W.hourly.temperature_2m[i], rain: W.hourly.precipitation[i] ?? 0, ws: W.hourly.wind_speed_10m[i] ?? 0, wd: W.hourly.wind_direction_10m[i]}); });
 
   // 潮位：まず気象庁の潮位表（一番近い港）、無ければ Open-Meteo の数値モデル
   let tideHtml = `<p class="muted small" style="margin:0">この地点の潮位データはありません（陸の上の地点だと出ません。海沿いの釣り場を選んでください）。</p>`;
@@ -783,6 +784,24 @@ async function renderUmi(){
     tideHtml = tideSvg(modelPts(M.hourly.time, M.hourly.sea_level_height_msl, dayStr), ext, umi.day === 0, 'm') + extList(ext)
       + `<p class="src" style="margin:8px 0 0">近くに気象庁の潮位表の地点が無いため、数値モデル（Open-Meteo）の目安を表示しています。数十分ずれることがあります。</p>`;
   }
+  // おすすめ度の計算に使う、その日の毎時の潮位（0時〜翌0時）
+  let tideSeries = null;
+  if (tt) tideSeries = [...tt.hourly, tt.next0 ?? tt.hourly[23]];
+  else if (M?.hourly?.sea_level_height_msl){
+    const i0 = M.hourly.time.indexOf(dayStr + 'T00:00');
+    if (i0 >= 0){ const s = M.hourly.sea_level_height_msl.slice(i0, i0 + 25); if (s.length === 25 && s.every(v => v != null)) tideSeries = s; }
+  }
+  const toH = s => s ? +s.slice(11,13) + +s.slice(14,16) / 60 : null;
+  const scored = scoreHours(hrs, tideSeries, toH(W.daily.sunrise[di]), toH(W.daily.sunset[di]));
+  const best = bestWindow(scored);
+  const hours = hrs.map((x, k) => {
+    const [, ic] = wx(x.code), sc = scored[k];
+    return `<div class="hour${x.ws >= 7 ? ' strong' : ''}" data-h="${x.h}"><div class="lv lv${sc.lv}" title="おすすめ度 ${sc.score}">${['△','○','◎'][sc.lv]}</div><div class="t">${x.h}時</div><div class="i">${ic}</div><div>${Math.round(x.temp)}°</div><div class="rain">${x.rain > 0 ? '☂' + x.rain.toFixed(1) + 'mm' : '雨なし'}</div><div class="wind"><span class="arrow" style="transform:rotate(${x.wd}deg)">↓</span>${x.ws.toFixed(0)}m</div></div>`;
+  }).join('');
+  const bestHtml = best && best.score >= 55
+    ? `<div class="best"><span class="best-time num">${best.from}時〜${best.to}時</span><span class="lv lv${best.lv} big">${['△','○','◎'][best.lv]}</span></div>
+       <div class="row" style="gap:6px">${best.reasons.map(r => `<span class="chip">${esc(r)}</span>`).join('')}</div>`
+    : `<p style="margin:0">今日は${scored.some(s => s.reasons.includes('風が強い')) ? '風が強く' : scored.some(s => s.reasons.includes('雨')) ? '雨が多く' : '条件がそろわず'}、特におすすめの時間はありません。</p>`;
   if (M && M.hourly){
     const idx = M.hourly.time.map((t,i) => t.startsWith(dayStr) ? i : -1).filter(i => i >= 0);
     const ss = idx.map(i => M.hourly.sea_surface_temperature?.[i]).filter(v => v != null);
@@ -809,11 +828,63 @@ async function renderUmi(){
         ${wave ? `<div class="fact"><span class="label">波の高さ（最大）</span><b>${wave} m</b></div>` : ''}
       </div>
     </div>
+    <div class="card"><h2>釣りに行くなら</h2>${bestHtml}
+      <p class="small muted" style="margin:8px 0 0">風・雨・潮の動き・マヅメ（日の出・日の入りの前後）から計算した目安です。${personalStats() ? '条件付きの釣果が10件以上あるので、あなたがよく釣れている時間帯や潮も加味しています。' : '条件付きの釣果が10件たまると、あなた自身がよく釣れている条件も加味します。'}</p></div>
     <div class="card"><h2>潮の満ち引き</h2>${tideHtml}</div>
-    <div class="card"><h2>1時間ごとの天気</h2><div class="hours" id="hours">${hours}</div><p class="small muted" style="margin:6px 0 0">矢印は風が吹いていく向き。赤字は風が強い時間（7m/s以上）。</p></div>
+    <div class="card"><h2>1時間ごとの天気</h2><div class="hours" id="hours">${hours}</div><p class="small muted" style="margin:6px 0 0">上の印は釣りのおすすめ度（◎ よい・○ ふつう・△ いまいち）。矢印は風が吹いていく向き。赤字は風が強い時間（7m/s以上）。</p></div>
     <p class="src">天気：気象庁の予報モデル（Open-Meteo 経由、${new Date(fc.t).getHours()}時${pad(new Date(fc.t).getMinutes())}分に取得）。潮位：気象庁 潮位表。波の高さ・海水温：Open-Meteo の海洋モデル。潮回り：新月の時刻を天文計算し、旧暦の日付から求めています。</p>`;
   // 横スクロールを朝4時あたりから見せる
   const h4 = body.querySelector('.hour[data-h="4"]'); if (h4) $('#hours').scrollLeft = h4.offsetLeft - $('#hours').offsetLeft;
+}
+
+/* ---- 釣りのおすすめ度（1時間ごと、0〜100点）----
+   ・基本40点。◎は75点以上、○は55点以上
+   ・風：弱いほど良い（10m/s以上は大きく減点）　・雨：降っていると減点
+   ・潮の動き：その日の中で潮位がよく変わる時間ほど加点（魚の食いが立ちやすいと言われる）
+   ・マヅメ：日の出・日の入りの前後1時間は加点　・夜：足元が暗いので少し減点
+   ・条件付きの釣果が10件以上あれば、本人がよく釣れている時間帯・潮の動きにも加点 */
+function personalStats(){
+  const cs = catches.filter(c => c.cond); if (cs.length < 10) return null;
+  const avg = list => list.length ? list.reduce((a, c) => a + countOf(c), 0) / list.length : 0;
+  const all = avg(cs), by = key => Object.fromEntries([...new Set(cs.map(c => c.cond[key]).filter(Boolean))].map(k => [k, avg(cs.filter(c => c.cond[key] === k))]));
+  return {all, band: by('band'), trend: by('trend')};
+}
+function scoreHours(hrs, tideSeries, sr, ss){
+  const rates = tideSeries ? hrs.map(x => Math.abs(tideSeries[Math.min(24, x.h + 1)] - tideSeries[x.h])) : null;
+  const maxRate = rates ? Math.max(...rates, 1e-9) : 1;
+  const me = personalStats();
+  return hrs.map((x, k) => {
+    let s = 40; const why = [];
+    if (x.ws < 3){ s += 10; why.push('風が弱い'); } else if (x.ws < 5) s += 5; else if (x.ws < 7) s -= 10; else if (x.ws < 10){ s -= 30; why.push('風が強い'); } else { s -= 50; why.push('風が強い'); }
+    if (x.rain >= 1){ s -= 30; why.push('雨'); } else if (x.rain > 0) s -= 10;
+    const mid = x.h + 0.5;
+    const band = sr != null && Math.abs(mid - sr) <= 1.2 ? '朝マヅメ' : ss != null && Math.abs(mid - ss) <= 1.2 ? '夕マヅメ' : sr != null && mid > sr && mid < ss ? '日中' : '夜';
+    if (band.includes('マヅメ')){ s += 20; why.push(band); }
+    if (band === '夜') s -= 15;
+    let trend = null;
+    if (rates){
+      const r = rates[k] / maxRate; s += Math.round(r * 20);
+      if (r > 0.6) why.push('潮がよく動く'); else if (r < 0.2) why.push('潮止まり');
+      trend = r < 0.2 ? '潮止まり前後' : tideSeries[Math.min(24, x.h + 1)] > tideSeries[x.h] ? '上げ潮' : '下げ潮';
+      if (r >= 0.2) why.push(trend);
+    }
+    if (me){
+      if ((me.band[band] || 0) > me.all * 1.2){ s += 10; why.push('あなたが釣れている時間帯'); }
+      if (trend && (me.trend[trend] || 0) > me.all * 1.2){ s += 10; why.push('あなたが釣れている潮'); }
+    }
+    s = Math.max(0, Math.min(100, s));
+    return {h: x.h, score: s, lv: s >= 75 ? 2 : s >= 55 ? 1 : 0, reasons: why};
+  });
+}
+// 4時〜20時の中で、続けて2時間の平均点がいちばん高い時間帯
+function bestWindow(scored){
+  let best = null;
+  for (let i = 0; i + 1 < scored.length; i++){
+    const a = scored[i], b = scored[i+1]; if (a.h < 4 || b.h > 20) continue;
+    const score = (a.score + b.score) / 2;
+    if (!best || score > best.score) best = {from: a.h, to: b.h + 1, score, lv: score >= 75 ? 2 : score >= 55 ? 1 : 0, reasons: [...new Set([...a.reasons, ...b.reasons])].filter(r => !['風が強い','雨','潮止まり'].includes(r))};
+  }
+  return best;
 }
 
 /* =========================================================
