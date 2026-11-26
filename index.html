@@ -152,6 +152,8 @@ textarea{min-height:80px;resize:vertical}
 .add-bar{background:var(--card);border:2px solid var(--float);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px}
 .add-bar p{margin:0}
 #map-results button{text-align:left}
+#cf-map{height:240px;border-radius:12px;border:1px solid var(--line);z-index:0}
+#cf-where{margin-bottom:4px}
 
 /* ログイン画面 */
 body.signed-out main, body.signed-out .tabbar{display:none}
@@ -345,7 +347,9 @@ function idb(){
   return dbp ||= new Promise((res, rej) => {
     const r = indexedDB.open('tsuri-techo', 2);
     r.onupgradeneeded = () => { const d = r.result; for (const n of ['catches','spots','photos']) if (!d.objectStoreNames.contains(n)) d.createObjectStore(n, {keyPath:'id'}); };
-    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    // 新しい版のアプリが別のタブで開かれた時は接続を譲る（古いタブが保存を止めてしまわないように）
+    r.onsuccess = () => { r.result.onversionchange = () => { r.result.close(); dbp = null; }; res(r.result); };
+    r.onerror = () => rej(r.error);
   });
 }
 async function dbAll(store){ const d = await idb(); return new Promise((res, rej) => { const q = d.transaction(store).objectStore(store).getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
@@ -484,7 +488,8 @@ document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('cli
 /* =========================================================
    4. 下から出るシート（入力フォームや詳細表示）
    ========================================================= */
-function openSheet(html, mount){ const b = $('#sheet-body'); b.innerHTML = html; $('#sheet').hidden = false; document.body.classList.add('locked'); b.scrollTop = 0; mount && mount(b); }
+let miniMap = null;   // 釣果入力の中の小さな地図（シートを開き直すたびに作り直す）
+function openSheet(html, mount){ if (miniMap){ miniMap.remove(); miniMap = null; } const b = $('#sheet-body'); b.innerHTML = html; $('#sheet').hidden = false; document.body.classList.add('locked'); b.scrollTop = 0; mount && mount(b); }
 function closeSheet(){ $('#sheet').hidden = true; document.body.classList.remove('locked'); }
 $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet' || e.target.closest('[data-close]')) closeSheet(); });
 const sheetHead = t => `<div class="sheet-head"><h2>${esc(t)}</h2><button class="x" data-close type="button" aria-label="閉じる">×</button></div>`;
@@ -747,7 +752,27 @@ function fishSummary(c){   // 「アジ ×11・サバ ×3」のように魚の�
   const m = new Map(); for (const f of fishesOf(c)) m.set(f.fish, (m.get(f.fish) || 0) + (f.count || 1));
   return [...m].map(([f, n]) => n > 1 ? `${f} ×${n}` : f).join('・');
 }
-const fishRowHtml = f => `<div class="fish-row">
+/* 場所から「近くの登録済み釣り場」か「新しい釣り場の名前の候補」を出す
+   ・300m以内に登録済みの釣り場があれば、同じ釣り場として扱う（同じ堤防が何個も登録されないように）
+   ・なければ国土地理院の住所検索で「三浦市 三崎町城ヶ島」のような名前を作る（海の上なら近くの港の名前） */
+let muniP;
+const loadMuni = () => muniP ||= fetch('data/muni.json').then(r => r.json()).catch(() => ({}));
+async function describePlace(lat, lng){
+  const near = spots.map(s => ({s, d: distKm({lat, lng}, s)})).sort((a,b) => a.d - b.d)[0];
+  if (near && near.d <= 0.3) return {near: near.s, dist: near.d};
+  let name = '';
+  try {
+    const r = await fetch(`https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat=${lat}&lon=${lng}`);
+    const res = (await r.json()).results || {};
+    const muni = res.muniCd ? (await loadMuni())[String(parseInt(res.muniCd, 10))] || '' : '';
+    const town = (res.lv01Nm || '').replace(/[－-]/g, '').trim();
+    name = [muni, town].filter(Boolean).join(' ');
+  } catch {}
+  if (!name){ const st = await nearestStation({lat, lng}); if (st && st.d < 30) name = `${st.name}付近の海`; }
+  return {suggest: name || '新しい釣り場'};
+}
+
+const fishRowHtml = f =>`<div class="fish-row">
     <input class="fr-fish" list="fish-list" required value="${esc(f.fish)}" placeholder="例：アジ" aria-label="魚の種類">
     <input class="fr-size" type="number" inputmode="decimal" step="0.1" min="0" value="${esc(f.size ?? '')}" placeholder="—" aria-label="大きさ（cm）">
     <input class="fr-count" type="number" inputmode="numeric" min="1" value="${esc(f.count ?? 1)}" aria-label="匹数">
@@ -768,8 +793,19 @@ function catchForm(c){
         <p class="small muted" style="margin:0">大きさが違う魚は行を分けて入れられます（例：アジ 30cm ×1 と アジ 20cm ×10）。大きさを測っていなければ空のままでOK。</p>
       </div>
       <label class="field"><span>日時</span><input id="cf-at" type="datetime-local" required value="${esc(c.at)}"></label>
-      <label class="field"><span>釣り場</span><select id="cf-spot">${spotOpts}</select></label>
-      ${spots.length ? '' : '<p class="small muted" style="margin:-6px 0 0">釣り場は「釣り場」タブで登録できます。</p>'}
+      <div class="field">
+        <span>釣った場所</span>
+        <div class="seg" id="cf-where" role="group" aria-label="場所の決め方">
+          <button type="button" data-w="here">今いる場所</button>
+          <button type="button" data-w="map">地図で選ぶ</button>
+          <button type="button" data-w="list">登録済み</button>
+        </div>
+        <div id="cf-map-box" hidden><div class="map-wrap"><div id="cf-map"></div><div class="crosshair"></div></div>
+          <p class="small muted" style="margin:4px 0 0">地図を動かして、赤い十字を釣った場所に合わせてください。</p></div>
+        <select id="cf-spot" hidden>${spotOpts.replace('（場所を選ばない）', '（場所を記録しない）')}</select>
+        <p id="cf-place-info" class="small" style="margin:0"></p>
+        <label class="field" id="cf-name-wrap" hidden><span>新しい釣り場の名前（あとで直せます）</span><input id="cf-place-name"></label>
+      </div>
       <label class="field"><span>釣り方・エサ</span><input id="cf-method" value="${esc(c.method)}" placeholder="例：サビキ／アミエビ"></label>
       <label class="field"><span>メモ</span><textarea id="cf-memo" placeholder="例：朝マヅメに群れが回ってきた">${esc(c.memo)}</textarea></label>
       <label class="field"><span>写真</span><input id="cf-photo" type="file" accept="image/*"></label>
@@ -787,6 +823,45 @@ function catchForm(c){
       syncDel();
       const r = rowsBox.lastElementChild; (last ? r.querySelector('.fr-size') : r.querySelector('.fr-fish')).focus();
     });
+    // ---- 釣った場所：今いる場所 / 地図で選ぶ / 登録済みから ----
+    const place = {mode: '', lat: null, lng: null, near: null, seq: 0};
+    const info = b.querySelector('#cf-place-info'), nameWrap = b.querySelector('#cf-name-wrap'), nameIn = b.querySelector('#cf-place-name');
+    const sel = b.querySelector('#cf-spot');
+    async function resolvePlace(lat, lng){   // 位置が決まったら、近くの登録済み釣り場があるか・地名は何かを調べる
+      const seq = ++place.seq; Object.assign(place, {lat, lng, near: null});
+      nameWrap.hidden = true; info.textContent = '場所を調べています…';
+      const d = await describePlace(lat, lng);
+      if (seq !== place.seq) return;
+      if (d.near){ place.near = d.near; info.textContent = `登録済みの釣り場「${d.near.name}」（約${Math.round(d.dist*1000)}m）として記録します。`; }
+      else { info.textContent = 'ここは新しい釣り場として自動で登録されます。'; nameWrap.hidden = false; nameIn.value = d.suggest; }
+    }
+    function setWhere(mode){
+      place.mode = mode; place.seq++;
+      b.querySelectorAll('#cf-where button').forEach(x => x.setAttribute('aria-pressed', x.dataset.w === mode));
+      b.querySelector('#cf-map-box').hidden = mode !== 'map'; sel.hidden = mode !== 'list'; nameWrap.hidden = true; info.textContent = '';
+      if (mode === 'list'){ info.textContent = spots.length ? '' : 'まだ登録済みの釣り場がありません。「今いる場所」か「地図で選ぶ」を使ってください。'; return; }
+      if (mode === 'here'){
+        if (!navigator.geolocation){ info.textContent = 'この端末では現在地が使えません。「地図で選ぶ」を使ってください。'; return; }
+        info.textContent = '現在地を調べています…'; Object.assign(place, {lat: null, lng: null, near: null});
+        const seq = place.seq;
+        navigator.geolocation.getCurrentPosition(pos => { if (seq === place.seq) resolvePlace(+pos.coords.latitude.toFixed(5), +pos.coords.longitude.toFixed(5)); },
+          () => { if (seq === place.seq) info.textContent = '現在地を取得できませんでした。「地図で選ぶ」を使ってください。'; },
+          {timeout: 15000, enableHighAccuracy: true});
+      }
+      if (mode === 'map'){
+        if (!window.L){ info.textContent = '地図を読み込めませんでした。'; return; }
+        const start = place.lat != null ? [place.lat, place.lng] : spotById(c.spotId) ? [spotById(c.spotId).lat, spotById(c.spotId).lng] : [currentPlace().lat, currentPlace().lng];
+        if (!miniMap){
+          miniMap = L.map(b.querySelector('#cf-map')).setView(start, 14);
+          L.tileLayer(TILE.pale, {maxZoom: 19, maxNativeZoom: 18, attribution: GSI, className: 'tiles-pale'}).addTo(miniMap);
+          let t; miniMap.on('moveend', () => { clearTimeout(t); t = setTimeout(() => { if (place.mode === 'map'){ const m = miniMap.getCenter(); resolvePlace(+m.lat.toFixed(5), +m.lng.toFixed(5)); } }, 500); });
+        }
+        setTimeout(() => { miniMap.invalidateSize(); const m = miniMap.getCenter(); resolvePlace(+m.lat.toFixed(5), +m.lng.toFixed(5)); }, 60);
+      }
+    }
+    b.querySelectorAll('#cf-where button').forEach(x => x.addEventListener('click', () => setWhere(x.dataset.w)));
+    setWhere(isNew ? 'here' : 'list');   // 新しい記録は「今いる場所」から、直す時は今の釣り場のまま
+
     b.querySelector('#cf').addEventListener('submit', async e => {
       e.preventDefault();
       const fishes = [...rowsBox.querySelectorAll('.fish-row')].map(r => ({
@@ -795,15 +870,25 @@ function catchForm(c){
         count: Math.max(1, +r.querySelector('.fr-count').value || 1),
       })).filter(f => f.fish);
       if (!fishes.length) return toast('魚の種類を入れてください');
-      const btn = e.target.querySelector('[type=submit]'); btn.disabled = true; btn.textContent = '保存中…';
+      if (place.mode !== 'list' && place.lat == null) return toast('場所がまだ決まっていません。「地図で選ぶ」か「登録済み」を選んでください');
+      const btn = e.target.querySelector('[type=submit]');
+      if (btn.disabled) return;                               // 2回押しで釣り場が2つできないように
+      btn.disabled = true; btn.textContent = '保存中…';
+      // 釣った場所を決める（新しい場所なら、ここで釣り場として登録する）
+      let spotId = '', spotName = '';
+      if (place.mode === 'list'){ spotId = sel.value; spotName = spotById(spotId)?.name || ''; }
+      else if (place.near){ spotId = place.near.id; spotName = place.near.name; }
+      else {
+        const s = {id: uid(), name: nameIn.value.trim() || '名前のない釣り場', memo: '', lat: place.lat, lng: place.lng};
+        await S.saveSpot(s); spotId = s.id; spotName = s.name;
+      }
       const file = b.querySelector('#cf-photo').files[0];
       let photo;                                            // undefined = 写真はそのまま
       if (b.querySelector('#cf-rmphoto')?.checked) photo = false;
       if (file){ try { photo = await makePhoto(file); } catch { toast('写真を読み込めませんでした'); } }
-      const at = b.querySelector('#cf-at').value, spotId = b.querySelector('#cf-spot').value;
+      const at = b.querySelector('#cf-at').value;
       const rec = {
-        ...c, id: c.id || uid(), at, spotId,
-        spotName: spotById(spotId)?.name || '',
+        ...c, id: c.id || uid(), at, spotId, spotName,
         fishes,
         method: b.querySelector('#cf-method').value.trim(),
         memo: b.querySelector('#cf-memo').value.trim(),
@@ -973,7 +1058,7 @@ $('#add-here').addEventListener('click', () => { const c = map.getCenter(); setA
 function spotStats(id){ const cs = catches.filter(c => c.spotId === id); return {n: cs.reduce((a,c) => a + countOf(c), 0), days: new Set(cs.map(c => c.at.slice(0,10))).size}; }
 function renderSpotList(){
   const box = $('#spot-list');
-  if (!spots.length){ box.innerHTML = `<div class="card empty"><h3>釣り場が未登録です</h3><p style="margin:0">上の「釣り場を追加する」から、よく行く釣り場を登録しましょう。登録すると、その場所の天気と潮が見られます。</p></div>`; return; }
+  if (!spots.length){ box.innerHTML = `<div class="card empty"><h3>釣り場はまだありません</h3><p style="margin:0">釣果を記録すると、釣った場所がここに自動で登録されます。行く前に登録しておきたい時は、上の「釣り場を追加する」からどうぞ。登録した釣り場は、天気と潮も見られます。</p></div>`; return; }
   box.innerHTML = spots.map(s => { const st = spotStats(s.id); return `<button class="spot" type="button" data-id="${esc(s.id)}"><span><b>${esc(s.name)}</b><br><span class="small muted">${esc(s.memo || '')}</span></span><span class="num small muted" style="white-space:nowrap">${st.days}回 / ${st.n}匹</span></button>`; }).join('');
   box.querySelectorAll('.spot').forEach(el => el.onclick = () => { const s = spotById(el.dataset.id); if (map) map.setView([s.lat, s.lng], 15); spotDetail(s.id); });
 }
