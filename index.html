@@ -165,6 +165,8 @@ textarea{min-height:80px;resize:vertical}
 .months{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:3px}
 .mchip{border:1px solid var(--line);background:var(--card);border-radius:7px;padding:8px 0;font-size:.8rem;font-variant-numeric:tabular-nums;cursor:pointer;color:var(--muted)}
 .mchip[aria-pressed="true"]{background:var(--sea);border-color:var(--sea);color:var(--card);font-weight:700}
+.travel{color:var(--sea);font-weight:700}
+.sd-go{display:flex;flex-direction:column;gap:8px}
 .sd-sec{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:12px}
 .sd-sec h3{font-size:1.05rem}
 a.btn{display:flex;align-items:center;justify-content:center;text-decoration:none;color:inherit}
@@ -529,7 +531,7 @@ function showTab(tab){
   document.querySelectorAll('.tabbar button').forEach(b => { if (b.dataset.tab === tab) b.setAttribute('aria-current','page'); else b.removeAttribute('aria-current'); });
   if (tab === 'umi') renderUmi();
   if (tab === 'log') renderLog();
-  if (tab === 'map') renderMap();
+  if (tab === 'map'){ renderMap(); autoTravel(); }
   if (tab === 'stats') renderStats();
   window.scrollTo(0,0);
 }
@@ -1106,10 +1108,55 @@ $('#add-cancel').addEventListener('click', () => setAdding(false));
 $('#add-here').addEventListener('click', () => { const c = map.getCenter(); setAdding(false); spotForm({lat: +c.lat.toFixed(5), lng: +c.lng.toFixed(5)}); });
 
 function spotStats(id){ const cs = catches.filter(c => c.spotId === id); return {n: cs.reduce((a,c) => a + countOf(c), 0), days: new Set(cs.map(c => c.at.slice(0,10))).size}; }
+/* ---- 現在地から各釣り場まで、車で何分か ----
+   OSRM（OpenStreetMap の道路データで道順を計算する無料サービス）に、現在地と全部の釣り場を一度に渡して計算する。
+   渋滞は含まない目安。使えない時は「直線距離×1.3 を時速35kmで走る」ざっくり計算に切り替える。 */
+const travel = {from: null, at: 0, bySpot: {}, rough: false, busy: false};
+const fmtMin = m => m < 60 ? `約${Math.max(1, Math.round(m))}分` : `約${Math.floor(m / 60)}時間${Math.round(m % 60) ? Math.round(m % 60) + '分' : ''}`;
+const travelText = id => { const t = travel.bySpot[id]; return t ? `車で${fmtMin(t.min)}・${t.km < 10 ? t.km.toFixed(1) : Math.round(t.km)}km` : ''; };
+function getHere(){
+  return new Promise((res, rej) => {
+    if (!navigator.geolocation) return rej(new Error('nogeo'));
+    navigator.geolocation.getCurrentPosition(p => res({lat: p.coords.latitude, lng: p.coords.longitude}), rej, {timeout: 15000, maximumAge: 5 * 60e3});
+  });
+}
+async function computeTravel(){
+  if (travel.busy || !spots.length) return;
+  travel.busy = true; renderSpotList();
+  try {
+    const from = await getHere();
+    const list = spots.slice(0, 99);   // 1回で計算できる数の上限に合わせる
+    let rough = false, bySpot = {};
+    try {
+      const coords = [from, ...list].map(p => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(';');
+      const r = await fetch(`https://router.project-osrm.org/table/v1/driving/${coords}?sources=0&annotations=duration,distance`);
+      const j = await r.json(); if (j.code !== 'Ok') throw 0;
+      list.forEach((s, i) => { const sec = j.durations[0][i+1], m = j.distances[0][i+1]; if (sec != null) bySpot[s.id] = {min: sec / 60, km: m / 1000}; });
+    } catch {
+      rough = true;
+      list.forEach(s => { const km = distKm(from, s) * 1.3; bySpot[s.id] = {min: km / 35 * 60, km}; });
+    }
+    Object.assign(travel, {from, at: Date.now(), bySpot, rough});
+  } catch { toast('現在地を取得できませんでした（位置情報の許可を確認してください）'); }
+  travel.busy = false; renderSpotList();
+}
+// すでに位置情報を許可している時は、釣り場タブを開いた時に自動で計算する
+async function autoTravel(){
+  if (travel.at && Date.now() - travel.at < 10 * 60e3) return;
+  try { const p = await navigator.permissions?.query({name: 'geolocation'}); if (p?.state === 'granted') computeTravel(); } catch {}
+}
+
 function renderSpotList(){
   const box = $('#spot-list');
   if (!spots.length){ box.innerHTML = `<div class="card empty"><h3>釣り場はまだありません</h3><p style="margin:0">釣果を記録すると、釣った場所がここに自動で登録されます。行く前に登録しておきたい時は、上の「釣り場を追加する」からどうぞ。登録した釣り場は、天気と潮も見られます。</p></div>`; return; }
-  box.innerHTML = spots.map(s => { const st = spotStats(s.id); return `<button class="spot" type="button" data-id="${esc(s.id)}"><span><b>${esc(s.name)}</b><br><span class="small muted">${esc(s.memo || '')}</span></span><span class="num small muted" style="white-space:nowrap">${st.days}回 / ${st.n}匹</span></button>`; }).join('');
+  const has = Object.keys(travel.bySpot).length > 0;
+  // 時間が出ている時は近い順に並べる
+  const list = has ? [...spots].sort((a, b) => (travel.bySpot[a.id]?.min ?? 1e9) - (travel.bySpot[b.id]?.min ?? 1e9)) : spots;
+  const head = `<div class="row" style="justify-content:space-between">
+      <span class="small muted">${travel.busy ? '現在地からの時間を計算しています…' : has ? `現在地から近い順（車・渋滞なしの目安${travel.rough ? '。直線距離からの推定' : ''}）` : '現在地から車で何分かかるか調べられます'}</span>
+      <button class="btn" id="btn-travel" type="button" ${travel.busy ? 'disabled' : ''}>${has ? '計算し直す' : '時間を調べる'}</button></div>`;
+  box.innerHTML = head + list.map(s => { const st = spotStats(s.id), tt = travelText(s.id); return `<button class="spot" type="button" data-id="${esc(s.id)}"><span><b>${esc(s.name)}</b>${tt ? `<br><span class="small travel num">${tt}</span>` : ''}</span><span class="num small muted" style="white-space:nowrap">${st.days}回 / ${st.n}匹</span></button>`; }).join('');
+  $('#btn-travel').onclick = computeTravel;
   box.querySelectorAll('.spot').forEach(el => el.onclick = () => { const s = spotById(el.dataset.id); if (map) map.setView([s.lat, s.lng], 15); spotDetail(s.id); });
 }
 /* ---- 釣り場の情報 ----
@@ -1189,6 +1236,15 @@ function spotDetail(id){
   const cal = seasonCalendar(s, cs);
   const q = encodeURIComponent(`${s.name} 釣果`);
   openSheet(`${sheetHead(s.name)}
+    <section class="sd-go">
+      <p class="travel num" id="sd-travel" style="margin:0">${travelText(s.id) ? `現在地から${travelText(s.id)}<span class="small muted">（渋滞なしの目安）</span>` : ''}</p>
+      ${travelText(s.id) ? '' : '<button class="linkbtn" id="sd-calc" type="button">現在地から何分かかるか調べる</button>'}
+      <p class="small muted" style="margin:0">道案内を開く（渋滞を考えた時間はこちらで分かります）</p>
+      <div class="grid2">
+        <a class="btn" href="https://maps.apple.com/?daddr=${s.lat},${s.lng}&dirflg=d" target="_blank" rel="noopener">Apple マップ</a>
+        <a class="btn" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}&travelmode=driving" target="_blank" rel="noopener">Google マップ</a>
+      </div>
+    </section>
     <button class="btn sea block" id="sd-umi" type="button">この場所の天気と潮を見る</button>
 
     <section class="sd-sec"><h3>最近の釣果をネットで探す</h3>
@@ -1213,6 +1269,13 @@ function spotDetail(id){
 
     <div class="grid2"><button class="btn" id="sd-edit" type="button">直す</button><button class="btn danger" id="sd-del" type="button">削除</button></div>`, b => {
     b.querySelector('#sd-umi').onclick = () => { umi.placeId = s.id; lsSet('placeId', s.id); closeSheet(); showTab('umi'); };
+    b.querySelector('#sd-calc')?.addEventListener('click', async e => {
+      e.target.textContent = '計算しています…'; e.target.disabled = true;
+      await computeTravel();
+      const t = travelText(s.id);
+      if (t){ b.querySelector('#sd-travel').innerHTML = `現在地から${esc(t)}<span class="small muted">（渋滞なしの目安）</span>`; e.target.remove(); }
+      else { e.target.textContent = '現在地から何分かかるか調べる'; e.target.disabled = false; }
+    });
     b.querySelector('#sd-edit').onclick = () => spotForm(s);
     b.querySelectorAll('[data-cid]').forEach(el => el.onclick = () => catchDetail(el.dataset.cid));
     const del = b.querySelector('#sd-del');
