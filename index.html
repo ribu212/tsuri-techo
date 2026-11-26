@@ -27,7 +27,7 @@
    レイアウト：上に帯、下にタブバー。スマホ片手で操作できる1カラム。 */
 :root{
   --bg:#eef3f2; --card:#ffffff; --ink:#142a30; --muted:#566d73; --line:#d3dfdf;
-  --band:#0f3d4c; --band-ink:#f2f7f6; --sea:#1d6278; --sea-soft:#d9e9ec;
+  --band:#0f3d4c; --band-ink:#f2f7f6; --sea:#1d6278; --sea-soft:#d9e9ec; --sea-mid:#9ccad6;
   --float:#d9482a; --float-ink:#ffffff; --ok:#2b7d55; --warn:#a86d00; --warn-bg:#fff2d6;
   --f-head:"Zen Maru Gothic","Hiragino Maru Gothic ProN","Noto Sans JP",sans-serif;
   --f-body:"Noto Sans JP","Hiragino Sans","Yu Gothic",system-ui,sans-serif;
@@ -36,7 +36,7 @@
 @media (prefers-color-scheme:dark){
   :root{
     --bg:#0b1a1f; --card:#12262c; --ink:#e4eeee; --muted:#93a9ad; --line:#23404a;
-    --band:#0d2e38; --band-ink:#e4eeee; --sea:#7cc3d6; --sea-soft:#173a45;
+    --band:#0d2e38; --band-ink:#e4eeee; --sea:#7cc3d6; --sea-soft:#173a45; --sea-mid:#2d6575;
     --float:#ff7a52; --float-ink:#1a0d08; --ok:#6fd0a0; --warn:#ffc35c; --warn-bg:#3a2c10;
     color-scheme:dark;
   }
@@ -137,7 +137,7 @@ textarea{min-height:80px;resize:vertical}
 .month-h{font-family:var(--f-head);color:var(--muted);font-size:.95rem;margin-top:6px}
 
 /* 地図 */
-.map-wrap{position:relative}
+.map-wrap{position:relative;z-index:0}   /* 地図のボタンが上に重なる画面（シート）を突き抜けないように */
 #map{height:min(62vh,560px);min-height:340px;border-radius:14px;border:1px solid var(--line);z-index:0}
 .bobber{width:26px;height:26px;border-radius:50%;background:linear-gradient(var(--float) 50%,#fff 50%);border:2px solid #222;box-shadow:0 2px 4px rgba(0,0,0,.35)}
 /* 釣り場の目印：ウキ＋名前の札（地図の上なので、テーマに関係なく白い札で読みやすく） */
@@ -159,6 +159,26 @@ textarea{min-height:80px;resize:vertical}
 #map-results button{text-align:left}
 #cf-map{height:240px;border-radius:12px;border:1px solid var(--line);z-index:0}
 #cf-where{margin-bottom:4px}
+/* 釣り場の情報：月ボタンと「釣れる魚カレンダー」 */
+.form-h{font-size:1.05rem;margin-top:6px}
+.season-row{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--line);border-radius:12px}
+.months{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:3px}
+.mchip{border:1px solid var(--line);background:var(--card);border-radius:7px;padding:8px 0;font-size:.8rem;font-variant-numeric:tabular-nums;cursor:pointer;color:var(--muted)}
+.mchip[aria-pressed="true"]{background:var(--sea);border-color:var(--sea);color:var(--card);font-weight:700}
+.sd-sec{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:12px}
+.sd-sec h3{font-size:1.05rem}
+a.btn{display:flex;align-items:center;justify-content:center;text-decoration:none;color:inherit}
+.cal-wrap{overflow-x:auto}
+.cal{border-collapse:separate;border-spacing:2px;width:100%;font-size:.78rem;font-variant-numeric:tabular-nums}
+.cal th{font-weight:700;color:var(--muted);padding:2px}
+.cal tbody th{text-align:left;color:var(--ink);white-space:nowrap;padding-right:6px;font-size:.85rem}
+.cal td{height:26px;min-width:20px;text-align:center;background:var(--bg);border-radius:5px;font-weight:700}
+.cal td.exp{background:var(--sea-mid)}
+.cal td.hit{background:var(--sea);color:var(--card)}
+.cal .now{outline:2px solid var(--float);outline-offset:-2px}
+.cal thead th.now{outline:none;color:var(--float)}
+.lg{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:4px}
+.lg-hit{background:var(--sea)} .lg-exp{background:var(--sea-mid);margin-left:4px}
 
 /* ホーム画面に追加の案内 */
 .install-hint{max-width:720px;margin:12px auto 0;background:var(--card);border:2px solid var(--sea);border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:10px;
@@ -1092,33 +1112,109 @@ function renderSpotList(){
   box.innerHTML = spots.map(s => { const st = spotStats(s.id); return `<button class="spot" type="button" data-id="${esc(s.id)}"><span><b>${esc(s.name)}</b><br><span class="small muted">${esc(s.memo || '')}</span></span><span class="num small muted" style="white-space:nowrap">${st.days}回 / ${st.n}匹</span></button>`; }).join('');
   box.querySelectorAll('.spot').forEach(el => el.onclick = () => { const s = spotById(el.dataset.id); if (map) map.setView([s.lat, s.lng], 15); spotDetail(s.id); });
 }
+/* ---- 釣り場の情報 ----
+   s.info   … 駐車場・トイレ・足場・注意・おすすめの釣り方（わかる所だけ）
+   s.season … ここで釣れる魚と時期 [{fish:'アジ', months:[5,6,7,8,9,10]}]（自分で入れる目安） */
+const SPOT_INFO = [
+  ['parking', '駐車場', '例：無料30台・朝6時から'],
+  ['toilet', 'トイレ', '例：入口の横にあり'],
+  ['footing', '足場', '例：柵あり・子どもも安心'],
+  ['caution', '注意すること', '例：夜は真っ暗・週末は混む'],
+  ['tips', 'おすすめの釣り方・エサ', '例：朝マヅメにサビキ'],
+];
+const monthChips = months => `<div class="months">${Array.from({length: 12}, (_, i) => `<button type="button" class="mchip" data-m="${i+1}" aria-pressed="${months.includes(i+1)}">${i+1}</button>`).join('')}</div>`;
+const seasonRowHtml = r => `<div class="season-row">
+    <div class="row"><input class="sr-fish" list="fish-list" value="${esc(r.fish)}" placeholder="例：アジ" aria-label="魚の種類" style="flex:1;min-width:0"><button type="button" class="fr-del" aria-label="この魚を消す">×</button></div>
+    ${monthChips(r.months || [])}
+  </div>`;
+
 function spotForm(s){
-  const isNew = !s.id;
+  const isNew = !s.id, info = s.info || {};
   openSheet(`${sheetHead(isNew ? '釣り場を登録' : '釣り場を直す')}
     <form id="sf" class="view" style="gap:12px">
       <label class="field"><span>名前</span><input id="sf-name" required value="${esc(s.name)}" placeholder="例：本牧海づり施設"></label>
-      <label class="field"><span>メモ</span><textarea id="sf-memo" placeholder="例：駐車場あり・トイレ近い・夜は暗い">${esc(s.memo)}</textarea></label>
+      <h3 class="form-h">釣り場の情報 <span class="small muted">（わかる所だけでOK）</span></h3>
+      ${SPOT_INFO.map(([k, label, ph]) => `<label class="field"><span>${label}</span><input data-info="${k}" value="${esc(info[k])}" placeholder="${esc(ph)}"></label>`).join('')}
+      <label class="field"><span>そのほかのメモ</span><textarea id="sf-memo" placeholder="自由に書けます">${esc(s.memo)}</textarea></label>
+      <h3 class="form-h">ここで釣れる魚と時期</h3>
+      <p class="small muted" style="margin:-6px 0 0">魚の名前を入れて、釣れる月を押してください（色が付いた月が「釣れる時期」）。自分の釣果は自動でカレンダーに加わります。</p>
+      <div id="sf-season" class="view" style="gap:12px">${(s.season || []).map(seasonRowHtml).join('')}</div>
+      <button type="button" class="btn" id="sf-add-season">＋ 魚を追加</button>
       <p class="small muted num" style="margin:0">位置：${s.lat}, ${s.lng}</p>
       <button class="btn primary block" type="submit">保存する</button>
     </form>`, b => {
+    const box = b.querySelector('#sf-season');
+    box.addEventListener('click', e => {
+      const chip = e.target.closest('.mchip'); if (chip) chip.setAttribute('aria-pressed', chip.getAttribute('aria-pressed') !== 'true');
+      if (e.target.closest('.fr-del')) e.target.closest('.season-row').remove();
+    });
+    b.querySelector('#sf-add-season').addEventListener('click', () => { box.insertAdjacentHTML('beforeend', seasonRowHtml({fish: '', months: []})); box.lastElementChild.querySelector('.sr-fish').focus(); });
     b.querySelector('#sf').addEventListener('submit', async e => {
       e.preventDefault();
-      const rec = {...s, id: s.id || uid(), name: b.querySelector('#sf-name').value.trim(), memo: b.querySelector('#sf-memo').value.trim()};
+      const infoOut = {}; b.querySelectorAll('[data-info]').forEach(i => { if (i.value.trim()) infoOut[i.dataset.info] = i.value.trim(); });
+      const season = [...box.querySelectorAll('.season-row')].map(r => ({
+        fish: r.querySelector('.sr-fish').value.trim(),
+        months: [...r.querySelectorAll('.mchip[aria-pressed="true"]')].map(c => +c.dataset.m),
+      })).filter(r => r.fish);
+      const rec = {...s, id: s.id || uid(), name: b.querySelector('#sf-name').value.trim(), memo: b.querySelector('#sf-memo').value.trim(), info: infoOut, season};
       await S.saveSpot(rec); closeSheet(); toast('保存しました');
     });
   });
 }
+
+/* 釣れる魚カレンダー：自分で入れた「釣れる時期」（薄い色）と、実際に自分が釣った月（濃い色＋匹数）を重ねて表示 */
+function seasonCalendar(s, cs){
+  const rows = new Map();   // 魚 → {exp:Set(月), hit:{月:匹数}, total}
+  const get = f => { if (!rows.has(f)) rows.set(f, {exp: new Set(), hit: {}, total: 0}); return rows.get(f); };
+  for (const r of s.season || []) r.months.forEach(m => get(r.fish).exp.add(m));
+  for (const f of fishRows(cs)){ const m = +f.c.at.slice(5,7), r = get(f.fish); r.hit[m] = (r.hit[m] || 0) + f.count; r.total += f.count; }
+  if (!rows.size) return '';
+  const now = new Date().getMonth() + 1;
+  const sorted = [...rows].sort((a, b) => b[1].total - a[1].total || b[1].exp.size - a[1].exp.size);
+  return `<div class="cal-wrap"><table class="cal">
+    <thead><tr><th></th>${Array.from({length: 12}, (_, i) => `<th class="${i+1 === now ? 'now' : ''}">${i+1}</th>`).join('')}</tr></thead>
+    <tbody>${sorted.map(([fish, r]) => `<tr><th>${esc(fish)}</th>${Array.from({length: 12}, (_, i) => {
+      const m = i + 1, n = r.hit[m];
+      const cls = [n ? 'hit' : r.exp.has(m) ? 'exp' : '', m === now ? 'now' : ''].join(' ').trim();
+      return `<td class="${cls}">${n || ''}</td>`;
+    }).join('')}</tr>`).join('')}</tbody></table></div>
+    <p class="small muted" style="margin:6px 0 0"><span class="lg lg-hit"></span>自分が釣った月（数字は匹数）　<span class="lg lg-exp"></span>釣れる時期の目安</p>`;
+}
+
 function spotDetail(id){
   const s = spotById(id); if (!s) return; const st = spotStats(id);
-  const fishCount = {}; fishRows(catches.filter(c => c.spotId === id)).forEach(f => fishCount[f.fish] = (fishCount[f.fish] || 0) + f.count);
-  const top = Object.entries(fishCount).sort((a,b) => b[1]-a[1]).slice(0,5).map(([f,n]) => `${esc(f)} ${n}匹`).join('、');
+  const cs = catches.filter(c => c.spotId === id).sort((a, b) => b.at.localeCompare(a.at));
+  const info = s.info || {};
+  const infoRows = SPOT_INFO.filter(([k]) => info[k]).map(([k, label]) => `<dt>${label}</dt><dd>${esc(info[k])}</dd>`).join('');
+  const cal = seasonCalendar(s, cs);
+  const q = encodeURIComponent(`${s.name} 釣果`);
   openSheet(`${sheetHead(s.name)}
-    ${s.memo ? `<p style="margin:0;white-space:pre-wrap">${esc(s.memo)}</p>` : ''}
-    <p class="muted num" style="margin:0">釣行 ${st.days}回・合計 ${st.n}匹${top ? `<br>よく釣れた魚：${top}` : ''}</p>
     <button class="btn sea block" id="sd-umi" type="button">この場所の天気と潮を見る</button>
+
+    <section class="sd-sec"><h3>最近の釣果をネットで探す</h3>
+      <p class="small muted" style="margin:0 0 8px">釣果サイトや釣具屋さんのブログなど、ほかの人の釣果を検索します（Google が開きます）。</p>
+      <div class="grid2">
+        <a class="btn" href="https://www.google.com/search?q=${q}&tbs=qdr:w" target="_blank" rel="noopener">最近1週間</a>
+        <a class="btn" href="https://www.google.com/search?q=${q}&tbs=qdr:m" target="_blank" rel="noopener">最近1か月</a>
+      </div>
+    </section>
+
+    <section class="sd-sec"><h3>釣れる魚と時期</h3>
+      ${cal || '<p class="small muted" style="margin:0">まだありません。「直す」から釣れる魚と時期を入れるか、ここで釣果を記録すると自動で出てきます。</p>'}
+    </section>
+
+    <section class="sd-sec"><h3>釣り場の情報</h3>
+      ${infoRows || s.memo ? `<dl class="dl">${infoRows}${s.memo ? `<dt>メモ</dt><dd style="white-space:pre-wrap">${esc(s.memo)}</dd>` : ''}</dl>` : '<p class="small muted" style="margin:0">まだありません。「直す」から駐車場やトイレなどを書いておけます。</p>'}
+    </section>
+
+    <section class="sd-sec"><h3>自分の釣果 <span class="small muted num">釣行 ${st.days}回・合計 ${st.n}匹</span></h3>
+      ${cs.length ? `<div class="list">${cs.slice(0, 5).map(c => `<button class="spot" type="button" data-cid="${esc(c.id)}"><span>${esc(fishSummary(c))}</span><span class="small muted num">${fmtDate(c.at)}</span></button>`).join('')}</div>${cs.length > 5 ? `<p class="small muted" style="margin:6px 0 0">ほか ${cs.length - 5}件は「釣果帳」で見られます。</p>` : ''}` : '<p class="small muted" style="margin:0">まだこの釣り場の記録はありません。</p>'}
+    </section>
+
     <div class="grid2"><button class="btn" id="sd-edit" type="button">直す</button><button class="btn danger" id="sd-del" type="button">削除</button></div>`, b => {
     b.querySelector('#sd-umi').onclick = () => { umi.placeId = s.id; lsSet('placeId', s.id); closeSheet(); showTab('umi'); };
     b.querySelector('#sd-edit').onclick = () => spotForm(s);
+    b.querySelectorAll('[data-cid]').forEach(el => el.onclick = () => catchDetail(el.dataset.cid));
     const del = b.querySelector('#sd-del');
     del.onclick = async () => {
       if (!del.dataset.sure){ del.dataset.sure = 1; del.textContent = 'もう一度押すと削除'; return; }
