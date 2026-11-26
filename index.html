@@ -850,6 +850,89 @@ async function describePlace(lat, lng){
   return {suggest: name || '新しい釣り場'};
 }
 
+/* ---- 釣った時の条件（天気・風・海水温・潮・時間帯）----
+   釣果を保存すると、その日時・場所の条件を自動で取ってきて c.cond に入れる。
+   ・天気：60日より前は過去の観測をもとにした再解析データ（Open-Meteo の過去データ）、それ以降は気象庁モデル
+   ・海水温・波：Open-Meteo の海洋モデル
+   ・潮：気象庁の潮位表（一番近い港）から、その時刻の潮位・上げ潮か下げ潮か・満潮/干潮との時間差
+   ・時間帯：日の出・日の入りの前後1時間を「朝マヅメ」「夕マヅメ」とする */
+const getJSON = u => fetch(u).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+const condKey = (at, lat, lng) => `${at}|${(+lat).toFixed(4)}|${(+lng).toFixed(4)}`;
+const BANDS = ['朝マヅメ', '日中', '夕マヅメ', '夜'];
+const TRENDS = ['上げ潮', '下げ潮', '潮止まり前後'];
+
+async function tideAt(lat, lng, day, hourF){
+  const st = await nearestStation({lat, lng});
+  if (!st || st.d > 60) return null;
+  const tt = await tideTableDay(st.code, day); if (!tt) return null;
+  const hs = [...tt.hourly, tt.next0 ?? tt.hourly[23]];
+  const h = x => { const i = Math.max(0, Math.min(23, Math.floor(x))), f = x - i; return hs[i] + (hs[i+1] - hs[i]) * f; };
+  const rate = h(Math.min(24, hourF + 0.5)) - h(Math.max(0, hourF - 0.5));   // 1時間あたりの潮位の変化（cm）
+  const near = tt.ext.map(e => ({...e, diff: hourF - e.hour})).sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff))[0];
+  let trend = rate > 0 ? '上げ潮' : '下げ潮', phase = '';
+  if (near){
+    const mins = Math.round(Math.abs(near.diff) * 60);
+    if (mins <= 40) trend = '潮止まり前後';
+    const amt = mins < 60 ? `${Math.max(10, Math.round(mins / 10) * 10)}分` : `${Math.round(mins / 30) / 2}時間`.replace('.5時間', '時間半');
+    phase = mins < 10 ? `${near.type}ちょうど` : `${near.type}の${amt}${near.diff > 0 ? '後' : '前'}`;
+  }
+  return {tideCm: Math.round(h(hourF)), tideRate: Math.round(rate), trend, phase, station: st.name};
+}
+
+async function fetchConditions(lat, lng, at){
+  const day = at.slice(0, 10), hourF = +at.slice(11, 13) + +at.slice(14, 16) / 60, hi = Math.min(23, Math.round(hourF));
+  const ageDays = (Date.now() - Date.parse(day + 'T00:00:00+09:00')) / 864e5;
+  const q = `latitude=${lat}&longitude=${lng}&timezone=Asia%2FTokyo&start_date=${day}&end_date=${day}`;
+  const hv = 'temperature_2m,weather_code,wind_speed_10m,wind_direction_10m,precipitation';
+  const wUrl = ageDays > 60
+    ? `https://archive-api.open-meteo.com/v1/archive?${q}&wind_speed_unit=ms&hourly=${hv}&daily=sunrise,sunset`
+    : `https://api.open-meteo.com/v1/forecast?${q}&models=jma_seamless&wind_speed_unit=ms&hourly=${hv}&daily=sunrise,sunset`;
+  const [w, m, t] = await Promise.allSettled([getJSON(wUrl), getJSON(`https://marine-api.open-meteo.com/v1/marine?${q}&hourly=sea_surface_temperature,wave_height`), tideAt(lat, lng, day, hourF)]);
+  const cond = {key: condKey(at, lat, lng)};
+  if (w.status === 'fulfilled' && w.value.hourly){
+    const H = w.value.hourly, D = w.value.daily, v = k => H[k]?.[hi];
+    if (v('temperature_2m') != null) cond.temp = Math.round(v('temperature_2m') * 10) / 10;
+    if (v('weather_code') != null) cond.wx = wx(v('weather_code'))[0];
+    if (v('wind_speed_10m') != null) cond.wind = Math.round(v('wind_speed_10m') * 10) / 10;
+    if (v('wind_direction_10m') != null) cond.windDir = dirName(v('wind_direction_10m'));
+    if (v('precipitation') != null) cond.rain = v('precipitation');
+    const toH = s => s ? +s.slice(11, 13) + +s.slice(14, 16) / 60 : null;
+    const sr = toH(D?.sunrise?.[0]), ss = toH(D?.sunset?.[0]);
+    if (sr != null && ss != null) cond.band = Math.abs(hourF - sr) <= 1 ? '朝マヅメ' : Math.abs(hourF - ss) <= 1 ? '夕マヅメ' : hourF > sr && hourF < ss ? '日中' : '夜';
+  }
+  if (m.status === 'fulfilled' && m.value.hourly){
+    const sst = m.value.hourly.sea_surface_temperature?.[hi], wave = m.value.hourly.wave_height?.[hi];
+    if (sst != null) cond.sst = Math.round(sst * 10) / 10;
+    if (wave != null) cond.wave = Math.round(wave * 10) / 10;
+  }
+  if (t.status === 'fulfilled' && t.value) Object.assign(cond, t.value);
+  return cond;
+}
+// 釣果の条件を取ってきて記録に付け足す（保存の後ろで静かに動く。失敗しても記録そのものは無事）
+async function attachConditions(id, lat, lng){
+  const c0 = catches.find(x => x.id === id); if (!c0 || lat == null) return false;
+  try {
+    const cond = await fetchConditions(lat, lng, c0.at);
+    if (Object.keys(cond).length <= 1) return false;
+    const cur = catches.find(x => x.id === id) || c0;
+    await S.saveCatch({...cur, cond}); return true;
+  } catch { return false; }
+}
+function condHtml(c){
+  const k = c.cond; if (!k) return '';
+  const items = [
+    k.wx || k.temp != null ? ['天気', `${k.wx || ''}${k.temp != null ? ` ${k.temp}℃` : ''}`] : null,
+    k.wind != null ? ['風', `${k.windDir || ''} ${k.wind}m/s`] : null,
+    k.rain != null ? ['雨', `${k.rain}mm`] : null,
+    k.sst != null ? ['海水温', `${k.sst}℃`] : null,
+    k.wave != null ? ['波の高さ', `${k.wave}m`] : null,
+    k.trend ? ['潮', `${k.trend}${k.phase ? `（${k.phase}）` : ''}`] : null,
+    k.tideCm != null ? ['潮位', `${k.tideCm}cm（${k.station}）`] : null,
+    k.band ? ['時間帯', k.band] : null,
+  ].filter(Boolean);
+  return items.map(([a, b]) => `<dt>${a}</dt><dd class="num">${esc(b)}</dd>`).join('');
+}
+
 const fishRowHtml = f =>`<div class="fish-row">
     <input class="fr-fish" list="fish-list" required value="${esc(f.fish)}" placeholder="例：アジ" aria-label="魚の種類">
     <input class="fr-size" type="number" inputmode="decimal" step="0.1" min="0" value="${esc(f.size ?? '')}" placeholder="—" aria-label="大きさ（cm）">
@@ -981,6 +1064,9 @@ function catchForm(c){
       delete rec.fish; delete rec.size; delete rec.count;   // 前の形式の項目は消す
       try { await saveCatchWithPhotos(rec, add, removeIds); } catch { btn.disabled = false; btn.textContent = '保存する'; return toast('保存できませんでした'); }
       closeSheet(); toast(isNew ? '記録しました' : '直しました');
+      // 日時か場所が変わった時だけ、釣った時の条件を取り直す
+      const pos = place.mode === 'list' ? spotById(spotId) : {lat: place.lat, lng: place.lng};
+      if (pos && pos.lat != null && rec.cond?.key !== condKey(at, pos.lat, pos.lng)) attachConditions(rec.id, pos.lat, pos.lng);
     });
   });
 }
@@ -1000,7 +1086,15 @@ function catchDetail(id){
       <dt>釣り方</dt><dd>${esc(c.method || '—')}</dd>
       <dt>メモ</dt><dd style="white-space:pre-wrap">${esc(c.memo || '—')}</dd>
     </dl>
+    <section class="sd-sec"><h3>釣った時の条件</h3>
+      ${c.cond ? `<dl class="dl">${condHtml(c)}</dl>` : spotById(c.spotId) ? '<p class="small muted" style="margin:0">まだ取得していません。</p><button class="btn" id="cd-cond" type="button">条件を取得する</button>' : '<p class="small muted" style="margin:0">釣り場が決まっていない記録は、条件を取得できません。</p>'}
+    </section>
     <div class="grid2"><button class="btn" id="cd-edit" type="button">直す</button><button class="btn danger" id="cd-del" type="button">削除</button></div>`, b => {
+    b.querySelector('#cd-cond')?.addEventListener('click', async e => {
+      e.target.disabled = true; e.target.textContent = '取得しています…';
+      const s = spotById(c.spotId), ok = await attachConditions(c.id, s.lat, s.lng);
+      if (ok) catchDetail(c.id); else { e.target.disabled = false; e.target.textContent = '取得できませんでした。もう一度押す'; }
+    });
     // まず小さい写真を出し、大きい写真が届いたら差し替える
     const showPhoto = pid => {
       const p = photosOf(c).find(x => x.id === pid), img = b.querySelector('#cd-photo'); if (!p || !img) return;
@@ -1369,7 +1463,51 @@ function renderStats(){
     <div class="card"><h2>よく釣れた魚</h2>${bars(fishE, v => v + '匹')}</div>
     <div class="card"><h2>潮回り別の釣れ具合</h2><p class="small muted" style="margin:-4px 0 10px">1回の釣行で平均何匹釣れたか。釣行回数が少ない潮は参考程度に。</p>${bars(tideE, (v, d) => `${v.toFixed(1)}匹<span class="small muted">（${d}回）</span>`)}</div>
     <div class="card"><h2>月ごとの匹数</h2>${bars(monthE, v => v + '匹')}</div>
-    ${bestRows ? `<div class="card"><h2>魚ごとの自己ベスト</h2><div class="bars">${bestRows}</div></div>` : ''}`;
+    ${bestRows ? `<div class="card"><h2>魚ごとの自己ベスト</h2><div class="bars">${bestRows}</div></div>` : ''}
+    <div class="card" id="cond-card">${conditionAnalysis(Object.keys(byFish))}</div>`;
+  bindConditionAnalysis();
+}
+
+/* ---- 条件別の釣れ具合 ----
+   「釣った時の条件」が入っている記録を、時間帯・潮・海水温・風・天気でグループに分け、
+   1回の記録あたり平均何匹釣れたかを比べる。魚の種類で絞り込める */
+let statFish = '';
+const wxGroup = w => !w ? null : /雨|雪|雷/.test(w) ? '雨・雪' : /くもり|霧/.test(w) && !/晴れ時々/.test(w) ? 'くもり' : '晴れ';
+const COND_GROUPS = [
+  ['時間帯', c => c.cond.band, BANDS],
+  ['潮の動き', c => c.cond.trend, TRENDS],
+  ['海水温', c => c.cond.sst == null ? null : c.cond.sst < 12 ? '12℃未満' : c.cond.sst < 15 ? '12〜15℃' : c.cond.sst < 18 ? '15〜18℃' : c.cond.sst < 21 ? '18〜21℃' : c.cond.sst < 24 ? '21〜24℃' : '24℃以上', ['12℃未満', '12〜15℃', '15〜18℃', '18〜21℃', '21〜24℃', '24℃以上']],
+  ['風', c => c.cond.wind == null ? null : c.cond.wind < 3 ? '弱い（3m/s未満）' : c.cond.wind < 6 ? 'ふつう（3〜6m/s）' : '強い（6m/s以上）', ['弱い（3m/s未満）', 'ふつう（3〜6m/s）', '強い（6m/s以上）']],
+  ['天気', c => wxGroup(c.cond.wx), ['晴れ', 'くもり', '雨・雪']],
+];
+function conditionAnalysis(fishNames){
+  const withCond = catches.filter(c => c.cond), missing = catches.filter(c => !c.cond && spotById(c.spotId)).length;
+  const n = c => statFish ? fishesOf(c).filter(f => f.fish === statFish).reduce((a, f) => a + (f.count || 1), 0) : countOf(c);
+  const head = `<h2>条件別の釣れ具合</h2>
+    <p class="small muted" style="margin:-4px 0 10px">釣った時の天気・潮・水温などを自動で記録しています。1回の記録で平均何匹釣れたかを比べます（回数が少ない所は参考程度に）。</p>
+    <label class="field" style="margin-bottom:10px"><span>魚の種類で絞り込む</span><select id="st-fish"><option value="">すべての魚</option>${fishNames.map(f => `<option${f === statFish ? ' selected' : ''}>${esc(f)}</option>`).join('')}</select></label>
+    ${missing ? `<div class="notice" style="margin-bottom:10px">条件がまだ入っていない記録が ${missing}件あります。<div class="row" style="margin-top:8px"><button class="btn sea" id="st-backfill" type="button">まとめて取得する</button></div></div>` : ''}`;
+  if (!withCond.length) return head + '<p class="small muted" style="margin:0">まだ条件付きの記録がありません。これから記録する釣果から自動で入ります。</p>';
+  return head + COND_GROUPS.map(([title, key, order]) => {
+    const g = {};
+    for (const c of withCond){ const k = key(c); if (!k) continue; (g[k] ||= {n: 0, recs: 0}); g[k].n += n(c); g[k].recs++; }
+    const rows = order.filter(k => g[k]).map(k => [k, g[k].n / g[k].recs, g[k].recs]);
+    if (!rows.length) return '';
+    return `<h3 class="form-h" style="margin:14px 0 8px">${title}</h3>${bars(rows, (v, r) => `${v.toFixed(1)}匹<span class="small muted">（${r}回）</span>`)}`;
+  }).join('') + (withCond.length < 10 ? `<p class="small muted" style="margin:12px 0 0">条件付きの記録は今 ${withCond.length}件です。記録が増えるほど傾向がはっきりします。</p>` : '');
+}
+function bindConditionAnalysis(){
+  $('#st-fish')?.addEventListener('change', e => { statFish = e.target.value; renderStats(); });
+  $('#st-backfill')?.addEventListener('click', async e => {
+    const btn = e.target, todo = catches.filter(c => !c.cond && spotById(c.spotId));
+    btn.disabled = true; let done = 0;
+    for (const c of todo){
+      btn.textContent = `取得しています… ${done}/${todo.length}`;
+      const s = spotById(c.spotId); await attachConditions(c.id, s.lat, s.lng); done++;
+      await new Promise(r => setTimeout(r, 300));   // 天気サービスに負担をかけないよう少し間を空ける
+    }
+    toast(`${done}件の条件を取得しました`); renderStats();
+  });
 }
 function renderAccount(){
   const card = $('#acct-card');
