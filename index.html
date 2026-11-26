@@ -216,6 +216,13 @@ body.signed-out main, body.signed-out .tabbar{display:none}
 .ck{display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer;min-height:44px}
 .ck input{width:24px;height:24px;min-height:0;accent-color:var(--sea);flex:none}
 .ck input:checked + span{color:var(--muted);text-decoration:line-through}
+.who-bar{gap:6px;margin-bottom:12px}
+.invite{display:flex;flex-direction:column;gap:6px;background:var(--bg);border-radius:12px;padding:12px;margin-bottom:10px}
+.invite .code{font-family:var(--f-head);font-size:2rem;letter-spacing:.18em}
+#view-banner{margin-bottom:12px}
+/* 家族の記録を見ている時は、書き換える操作を隠す */
+body.viewing #add-catch, body.viewing #add-spot, body.viewing #cd-edit, body.viewing #cd-del, body.viewing #sd-edit, body.viewing #sd-del,
+body.viewing #cd-cond, body.viewing #st-backfill, body.viewing #migrate-banner, body.viewing label[for="import-file"]{display:none!important}
 .linkbtn{background:none;border:0;color:var(--sea);text-decoration:underline;cursor:pointer;padding:6px 0;font-size:.95rem;align-self:flex-start}
 .spot{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;cursor:pointer;width:100%;text-align:left}
 .spot b{font-family:var(--f-head);font-size:1.1rem}
@@ -281,6 +288,9 @@ body.signed-out main, body.signed-out .tabbar{display:none}
 <section id="auth" hidden></section>
 
 <main>
+  <!-- 家族の記録を見ている時の帯と、だれの記録を見るかの切り替え -->
+  <div id="who-bar" class="row who-bar" hidden></div>
+  <div id="view-banner" class="notice" hidden><span id="view-banner-text"></span> <button class="btn" id="view-back" type="button" style="margin-top:6px">自分の記録に戻る</button></div>
   <!-- ===== 今日の海（天気・潮） ===== -->
   <section class="view" id="v-umi">
     <div class="row">
@@ -335,6 +345,7 @@ body.signed-out main, body.signed-out .tabbar{display:none}
   <section class="view" id="v-stats" hidden>
     <div id="stats-body" class="view"></div>
     <div class="card" id="acct-card" hidden></div>
+    <div class="card" id="family-card" hidden></div>
     <div class="card">
       <h2>文字の大きさ</h2>
       <div class="seg" id="font-size" role="group" aria-label="文字の大きさ">
@@ -483,14 +494,21 @@ async function initFirebase(){
   catch { db = F.getFirestore(app); }
   fb = {auth, db, A, F};
 }
-const userCol = name => fb.F.collection(fb.db, 'users', user.uid, name);
-const userDoc = (name, id) => fb.F.doc(fb.db, 'users', user.uid, name, id);
+// 家族の記録を見ている時（viewAs）は、その人の場所を読む。設定（settings）はいつも自分の場所
+let viewAs = null;
+const dataUid = () => viewAs?.uid || user.uid;
+const userCol = (name, uid = dataUid()) => fb.F.collection(fb.db, 'users', uid, name);
+const userDoc = (name, id, uid = dataUid()) => fb.F.doc(fb.db, 'users', uid, name, id);
 const plain = o => JSON.parse(JSON.stringify(o));   // クラウドに送れない値（undefined など）を取り除く
 const sent = p => p.catch(e => { console.error(e); toast('保存できませんでした。通信状態を確かめて、もう一度お試しください'); });
 let unsubs = [];
 function listenCloud(){
   unsubs.forEach(u => u()); unsubs = [];
-  const fail = e => { console.error(e); toast('記録を読み込めませんでした'); };
+  const fail = e => {
+    console.error(e);
+    if (viewAs && e?.code === 'permission-denied'){ toast('この家族の記録を見る許可がなくなりました'); removeFollowing(viewAs.uid); setViewAs(null); return; }
+    toast('記録を読み込めませんでした');
+  };
   // onSnapshot：クラウドの記録が変わるたびに自動で呼ばれる（別の端末で記録しても反映される）
   unsubs.push(fb.F.onSnapshot(userCol('catches'), snap => { catches = snap.docs.map(d => d.data()); onData(); }, fail));
   unsubs.push(fb.F.onSnapshot(userCol('spots'), snap => { spots = snap.docs.map(d => d.data()); onData(); }, fail));
@@ -510,8 +528,8 @@ const cloudStore = {
   async deleteSpot(id){ sent(fb.F.deleteDoc(userDoc('spots', id))); },
   async getPhoto(id){ try { const s = await fb.F.getDoc(userDoc('photos', id)); return s.exists() ? s.data().data : null; } catch { return null; } },
   // 読めなかった時は undefined（「まだ無い」の null と区別して、うっかり初期値で上書きしないように）
-  async getSetting(k){ try { const s = await fb.F.getDoc(userDoc('settings', k)); return s.exists() ? s.data().value : null; } catch { return undefined; } },
-  async saveSetting(k, v){ sent(fb.F.setDoc(userDoc('settings', k), {value: plain(v)})); },
+  async getSetting(k){ try { const s = await fb.F.getDoc(userDoc('settings', k, user.uid)); return s.exists() ? s.data().value : null; } catch { return undefined; } },
+  async saveSetting(k, v){ sent(fb.F.setDoc(userDoc('settings', k, user.uid), {value: plain(v)})); },
 };
 
 /* ---- 写真（1件の釣果に最大5枚）----
@@ -1661,6 +1679,7 @@ function bindConditionAnalysis(){
   });
 }
 function renderAccount(){
+  renderFamily();
   const card = $('#acct-card');
   if (S?.mode !== 'cloud' || !user){ card.hidden = true; return; }
   card.hidden = false;
@@ -1867,12 +1886,95 @@ function renderAuth(mode){
 }
 function signedIn(){
   document.body.classList.remove('signed-out'); $('#auth').hidden = true;
-  listenCloud(); showTab(currentTab || 'umi'); checkMigration();
+  listenCloud(); listenFamily(); showTab(currentTab || 'umi'); checkMigration();
 }
 function signedOut(){
   unsubs.forEach(u => u()); unsubs = []; catches = []; spots = []; checklist = null;
+  famUnsubs.forEach(u => u()); famUnsubs = []; following = []; viewers = []; viewAs = null;
+  document.body.classList.remove('viewing'); $('#who-bar').hidden = true; $('#view-banner').hidden = true;
   document.body.classList.add('signed-out'); $('#auth').hidden = false;
   renderAuth('login'); window.scrollTo(0, 0);
+}
+
+/* =========================================================
+   10.7 家族で見せ合う
+   ・「招待コードを作る」→ 8文字のコード（7日間有効）を家族に伝える
+   ・家族が自分のアプリでコードを入れると、その人は自分の釣果・釣り場を「見るだけ」できるようになる
+   ・見せるのをやめる／見るのをやめる、はいつでもできる
+   ========================================================= */
+let following = [], viewers = [], famUnsubs = [], lastInvite = null;
+function listenFamily(){
+  famUnsubs.forEach(u => u());
+  famUnsubs = [
+    fb.F.onSnapshot(userCol('following', user.uid), s => { following = s.docs.map(d => ({uid: d.id, ...d.data()})); renderWhoBar(); if (currentTab === 'stats') renderFamily(); }, () => {}),
+    fb.F.onSnapshot(userCol('viewers', user.uid), s => { viewers = s.docs.map(d => ({uid: d.id, ...d.data()})); if (currentTab === 'stats') renderFamily(); }, () => {}),
+  ];
+}
+function renderWhoBar(){
+  const bar = $('#who-bar');
+  if (!following.length){ bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = '<span class="small muted">だれの記録：</span>' + [{uid: '', name: '自分'}, ...following].map(f =>
+    `<button type="button" class="chip-btn" data-uid="${esc(f.uid)}" aria-pressed="${(viewAs?.uid || '') === f.uid}">${esc(f.name || '名前なし')}</button>`).join('');
+  bar.querySelectorAll('button').forEach(b => b.onclick = () => setViewAs(b.dataset.uid ? following.find(f => f.uid === b.dataset.uid) : null));
+}
+function setViewAs(f){
+  viewAs = f ? {uid: f.uid, name: f.name} : null;
+  document.body.classList.toggle('viewing', !!viewAs);
+  $('#view-banner').hidden = !viewAs;
+  if (viewAs) $('#view-banner-text').textContent = `${viewAs.name || '家族'}さんの記録を見ています（見るだけで、直すことはできません）。`;
+  catches = []; spots = []; travel.bySpot = {}; travel.at = 0;
+  closeSheet(); listenCloud(); renderWhoBar(); showTab(currentTab);
+}
+$('#view-back').addEventListener('click', () => setViewAs(null));
+const famErr = e => toast(e?.code === 'permission-denied' ? '家族の機能の設定（Firebase のルール）がまだのようです' : '通信できませんでした。電波の良い所でお試しください');
+function newCode(){ const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', r = crypto.getRandomValues(new Uint8Array(8)); return [...r].map(x => A[x % A.length]).join(''); }
+async function removeFollowing(ownerUid){
+  try { await fb.F.deleteDoc(userDoc('viewers', user.uid, ownerUid)); } catch {}
+  try { await fb.F.deleteDoc(userDoc('following', ownerUid, user.uid)); } catch {}
+}
+function renderFamily(){
+  const card = $('#family-card');
+  if (S?.mode !== 'cloud' || !user || viewAs){ card.hidden = true; return; }
+  card.hidden = false;
+  card.innerHTML = `<h2>家族と見せ合う</h2>
+    <p class="small muted" style="margin:-4px 0 10px">お父さんとあなたなど、家族どうしで釣果や釣り場を見せ合えます。見せた相手は見るだけで、直したり消したりはできません。</p>
+    <h3 class="form-h">自分の記録を見せる</h3>
+    ${lastInvite ? `<div class="invite"><span class="small muted">招待コード（7日間有効）</span><b class="code num">${esc(lastInvite)}</b><span class="small">見せたい家族のアプリの「家族の記録を見る」に、このコードを入れてもらってください。</span><button class="btn" id="fam-copy" type="button">コードをコピー</button></div>` : ''}
+    <button class="btn sea" id="fam-invite" type="button">${lastInvite ? '別のコードを作る' : '招待コードを作る'}</button>
+    ${viewers.length ? `<p class="small muted" style="margin:10px 0 4px">見せている相手</p><div class="list">${viewers.map(v => `<div class="ck-row"><span style="flex:1">${esc(v.name || '名前なし')}</span><button class="btn" type="button" data-stop="${esc(v.uid)}">見せるのをやめる</button></div>`).join('')}</div>` : ''}
+    <h3 class="form-h" style="margin-top:16px">家族の記録を見る</h3>
+    <form class="row" id="fam-join"><input id="fam-code" placeholder="招待コード（8文字）" autocapitalize="characters" autocomplete="off" style="flex:1;min-width:0"><button class="btn sea" type="submit">見る</button></form>
+    ${following.length ? `<p class="small muted" style="margin:10px 0 4px">見ている相手（画面の上で切り替えられます）</p><div class="list">${following.map(f => `<div class="ck-row"><span style="flex:1">${esc(f.name || '名前なし')}</span><button class="btn" type="button" data-unfollow="${esc(f.uid)}">見るのをやめる</button></div>`).join('')}</div>` : ''}`;
+  $('#fam-invite').onclick = async e => {
+    e.target.disabled = true;
+    const code = newCode();
+    try {
+      await fb.F.setDoc(fb.F.doc(fb.db, 'invites', code), {owner: user.uid, name: user.displayName || '', expires: fb.F.Timestamp.fromMillis(Date.now() + 7 * 864e5)});
+      lastInvite = code; renderFamily();
+    } catch (ex){ famErr(ex); e.target.disabled = false; }
+  };
+  $('#fam-copy')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(lastInvite); toast('コピーしました'); } catch { toast('コピーできませんでした。コードを書き写してください'); } });
+  card.querySelectorAll('[data-stop]').forEach(b => b.onclick = async () => {
+    if (!b.dataset.sure){ b.dataset.sure = 1; b.textContent = 'もう一度押すとやめる'; return; }
+    try { await fb.F.deleteDoc(userDoc('viewers', b.dataset.stop, user.uid)); toast('見せるのをやめました'); } catch (ex){ famErr(ex); }
+  });
+  card.querySelectorAll('[data-unfollow]').forEach(b => b.onclick = async () => { await removeFollowing(b.dataset.unfollow); toast('見るのをやめました'); });
+  $('#fam-join').addEventListener('submit', async e => {
+    e.preventDefault();
+    const code = $('#fam-code').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (code.length !== 8) return toast('招待コードは8文字です');
+    try {
+      const inv = await fb.F.getDoc(fb.F.doc(fb.db, 'invites', code));
+      if (!inv.exists()) return toast('このコードは見つかりませんでした');
+      const d = inv.data();
+      if (d.owner === user.uid) return toast('これは自分で作ったコードです');
+      if (d.expires?.toMillis?.() < Date.now()) return toast('このコードは期限切れです。新しいコードを作ってもらってください');
+      await fb.F.setDoc(userDoc('viewers', user.uid, d.owner), {code, name: user.displayName || '', at: Date.now()});
+      await fb.F.setDoc(userDoc('following', d.owner, user.uid), {name: d.name || '家族'});
+      toast(`${d.name || '家族'}さんの記録を見られるようになりました。画面の上で切り替えられます`);
+    } catch (ex){ famErr(ex); }
+  });
 }
 
 /* =========================================================
