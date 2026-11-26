@@ -43,7 +43,9 @@
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 var(--f-body)}
+body{margin:0;background:var(--bg);color:var(--ink);font:1.0625rem/1.6 var(--f-body)}
+/* 文字の大きさ（設定で切り替え）：画面全体が rem 基準なので、ここを変えると一緒に大きくなる */
+html.fs-l{font-size:112.5%} html.fs-xl{font-size:125%}
 body.locked{overflow:hidden}
 button,input,select,textarea{font:inherit;color:inherit}
 img{max-width:100%;display:block}
@@ -208,6 +210,12 @@ body.signed-out main, body.signed-out .tabbar{display:none}
 #auth .lead{margin:0;color:var(--muted)}
 .err{color:var(--float);font-weight:700;font-size:.95rem;margin:0}
 .ok-msg{color:var(--ok);font-weight:700;font-size:.95rem;margin:0}
+.chip-btn{border:1px solid var(--line);background:var(--card);border-radius:99px;padding:6px 12px;cursor:pointer;font-weight:700;color:var(--sea)}
+.chip-btn[aria-pressed="true"]{background:var(--sea);border-color:var(--sea);color:var(--card)}
+.ck-row{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 6px 4px 12px}
+.ck{display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer;min-height:44px}
+.ck input{width:24px;height:24px;min-height:0;accent-color:var(--sea);flex:none}
+.ck input:checked + span{color:var(--muted);text-decoration:line-through}
 .linkbtn{background:none;border:0;color:var(--sea);text-decoration:underline;cursor:pointer;padding:6px 0;font-size:.95rem;align-self:flex-start}
 .spot{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;cursor:pointer;width:100%;text-align:left}
 .spot b{font-family:var(--f-head);font-size:1.1rem}
@@ -281,6 +289,7 @@ body.signed-out main, body.signed-out .tabbar{display:none}
     </div>
     <div class="seg" id="umi-days" role="group" aria-label="日付"></div>
     <div id="umi-body" class="view"><div class="card muted">読み込み中…</div></div>
+    <button class="btn block" id="open-checklist" type="button">出発前の持ち物チェック</button>
   </section>
 
   <!-- ===== 釣果帳 ===== -->
@@ -327,6 +336,13 @@ body.signed-out main, body.signed-out .tabbar{display:none}
     <div id="stats-body" class="view"></div>
     <div class="card" id="acct-card" hidden></div>
     <div class="card">
+      <h2>文字の大きさ</h2>
+      <div class="seg" id="font-size" role="group" aria-label="文字の大きさ">
+        <button type="button" data-fs="">ふつう</button><button type="button" data-fs="fs-l">大きめ</button><button type="button" data-fs="fs-xl">とても大きく</button>
+      </div>
+      <p class="small muted" style="margin:8px 0 0">このスマホだけの設定です。</p>
+    </div>
+    <div class="card">
       <h2>データのバックアップ</h2>
       <p class="small muted" style="margin:0 0 10px" id="backup-note">記録はこのスマホの中だけに保存されています。機種変更の前などに書き出しておくと安心です。</p>
       <div class="row">
@@ -334,6 +350,9 @@ body.signed-out main, body.signed-out .tabbar{display:none}
         <label class="btn" for="import-file" style="display:inline-flex;align-items:center">読み込む</label>
         <input id="import-file" type="file" accept="application/json,.json" hidden>
       </div>
+      <h3 class="form-h" style="margin-top:14px">表（CSV）で書き出す</h3>
+      <p class="small muted" style="margin:4px 0 10px">Excel や Python（Jupyter）で分析できる表の形です。魚1行ずつに、日時・釣り場・潮・天気・水温などの条件が付きます。</p>
+      <button class="btn" id="btn-csv" type="button">CSV で書き出す</button>
     </div>
   </section>
 </main>
@@ -447,6 +466,8 @@ const localStore = {
   async deleteSpot(id){ await dbTx('spots', st => st.delete(id)); await reloadLocal(); },
   async getPhoto(id){ return (await dbGet('photos', id))?.data || null; },
   async clearAll(){ for (const n of ['catches','spots','photos']) await dbTx(n, st => st.clear()); },
+  async getSetting(k){ try { return JSON.parse(localStorage.getItem('setting:' + k)); } catch { return null; } },
+  async saveSetting(k, v){ lsSet('setting:' + k, JSON.stringify(v)); },
 };
 async function reloadLocal(){ const {cs, ss} = await localStore.load(); catches = cs; spots = ss; onData(); }
 
@@ -488,6 +509,9 @@ const cloudStore = {
   async saveSpot(rec){ sent(fb.F.setDoc(userDoc('spots', rec.id), plain(rec))); },
   async deleteSpot(id){ sent(fb.F.deleteDoc(userDoc('spots', id))); },
   async getPhoto(id){ try { const s = await fb.F.getDoc(userDoc('photos', id)); return s.exists() ? s.data().data : null; } catch { return null; } },
+  // 読めなかった時は undefined（「まだ無い」の null と区別して、うっかり初期値で上書きしないように）
+  async getSetting(k){ try { const s = await fb.F.getDoc(userDoc('settings', k)); return s.exists() ? s.data().value : null; } catch { return undefined; } },
+  async saveSetting(k, v){ sent(fb.F.setDoc(userDoc('settings', k), {value: plain(v)})); },
 };
 
 /* ---- 写真（1件の釣果に最大5枚）----
@@ -1689,6 +1713,83 @@ $('#import-file').addEventListener('change', async e => {
 });
 
 /* =========================================================
+   9.5 文字の大きさ・持ち物チェック・CSV 書き出し
+   ========================================================= */
+// ---- 文字の大きさ（この端末だけの設定）----
+function applyFontSize(fs){
+  document.documentElement.classList.remove('fs-l', 'fs-xl'); if (fs) document.documentElement.classList.add(fs);
+  document.querySelectorAll('#font-size button').forEach(b => b.setAttribute('aria-pressed', b.dataset.fs === (fs || '')));
+  if (map) setTimeout(() => map.invalidateSize(), 50);
+}
+applyFontSize(lsGet('fontSize') || '');
+document.querySelectorAll('#font-size button').forEach(b => b.onclick = () => { lsSet('fontSize', b.dataset.fs); applyFontSize(b.dataset.fs); });
+
+// ---- 出発前の持ち物チェック ----
+// 釣り方ごとのリスト。項目の追加・削除ができ、アカウントに保存されるので別の端末でも同じリストが使える
+const DEFAULT_CHECKLIST = {lists: [
+  {name: 'いつもの', items: ['竿', 'リール', '仕掛け', 'エサ', 'クーラーボックス・保冷剤', '水くみバケツ', 'タオル', 'ハサミ・プライヤー', 'ライフジャケット', '帽子・日焼け止め', '飲み物', 'ゴミ袋', 'ヘッドライト（暗い時間）']},
+  {name: 'サビキ', items: ['サビキ仕掛け', 'アミエビ', 'コマセカゴ', 'スプーン']},
+  {name: 'ちょい投げ', items: ['天秤オモリ', '投げ釣り仕掛け', '青イソメ・石ゴカイ', '竿立て']},
+  {name: 'ウキ釣り', items: ['ウキ・ウキ止め', 'ハリ・ハリス', 'ガン玉', '練りエサ・オキアミ']},
+].map((l, i) => ({id: 'l' + i, name: l.name, items: l.items.map((t, j) => ({id: `i${i}_${j}`, text: t, done: false}))}))};
+let checklist = null, checklistTab = 0, checklistSavable = true;
+async function openChecklist(){
+  if (!checklist){
+    const v = await S.getSetting('checklist');
+    checklistSavable = v !== undefined;
+    checklist = v || structuredClone(DEFAULT_CHECKLIST);
+  }
+  renderChecklist();
+}
+function saveChecklist(){ if (checklistSavable) S.saveSetting('checklist', checklist); }
+function renderChecklist(){
+  const l = checklist.lists[checklistTab] || checklist.lists[0]; if (!l) return;
+  const left = l.items.filter(i => !i.done).length;
+  openSheet(`${sheetHead('出発前の持ち物チェック')}
+    ${checklistSavable ? '' : '<div class="notice">通信できないため、今回の変更は保存されません。</div>'}
+    <div class="row" style="gap:6px">${checklist.lists.map((x, k) => `<button type="button" class="chip-btn" data-k="${k}" aria-pressed="${x === l}">${esc(x.name)}</button>`).join('')}<button type="button" class="chip-btn" id="ck-addlist">＋ リスト</button></div>
+    <p class="${left ? 'muted' : 'ok-msg'}" style="margin:0">${left ? `あと ${left}個` : 'ぜんぶ準備できました！'}</p>
+    <div class="list" id="ck-items">${l.items.map(i => `<div class="ck-row"><label class="ck"><input type="checkbox" data-id="${esc(i.id)}"${i.done ? ' checked' : ''}><span>${esc(i.text)}</span></label><button type="button" class="fr-del" data-del="${esc(i.id)}" aria-label="この項目を消す">×</button></div>`).join('')}</div>
+    <form class="row" id="ck-add"><input id="ck-text" placeholder="持ち物を追加" style="flex:1;min-width:0"><button class="btn" type="submit">追加</button></form>
+    <div class="grid2"><button class="btn" id="ck-reset" type="button">チェックを全部外す</button><button class="btn danger" id="ck-dellist" type="button">このリストを消す</button></div>`, b => {
+    b.querySelectorAll('[data-k]').forEach(x => x.onclick = () => { checklistTab = +x.dataset.k; renderChecklist(); });
+    b.querySelectorAll('#ck-items input').forEach(x => x.onchange = () => { const it = l.items.find(i => i.id === x.dataset.id); it.done = x.checked; saveChecklist(); renderChecklist(); });
+    b.querySelectorAll('[data-del]').forEach(x => x.onclick = () => { l.items = l.items.filter(i => i.id !== x.dataset.del); saveChecklist(); renderChecklist(); });
+    b.querySelector('#ck-add').addEventListener('submit', e => { e.preventDefault(); const t = b.querySelector('#ck-text').value.trim(); if (!t) return; l.items.push({id: uid(), text: t, done: false}); saveChecklist(); renderChecklist(); });
+    b.querySelector('#ck-reset').onclick = () => { l.items.forEach(i => i.done = false); saveChecklist(); renderChecklist(); };
+    b.querySelector('#ck-addlist').onclick = () => {
+      b.querySelector('#ck-add').outerHTML = `<form class="row" id="ck-newlist"><input id="ck-listname" placeholder="新しいリストの名前（例：夜釣り）" style="flex:1;min-width:0"><button class="btn sea" type="submit">作る</button></form>`;
+      b.querySelector('#ck-listname').focus();
+      b.querySelector('#ck-newlist').addEventListener('submit', e => { e.preventDefault(); const n = b.querySelector('#ck-listname').value.trim(); if (!n) return; checklist.lists.push({id: uid(), name: n, items: []}); checklistTab = checklist.lists.length - 1; saveChecklist(); renderChecklist(); });
+    };
+    const dl = b.querySelector('#ck-dellist');
+    dl.onclick = () => {
+      if (checklist.lists.length <= 1) return toast('リストは1つ以上必要です');
+      if (!dl.dataset.sure){ dl.dataset.sure = 1; dl.textContent = 'もう一度押すと消す'; return; }
+      checklist.lists.splice(checklist.lists.indexOf(l), 1); checklistTab = 0; saveChecklist(); renderChecklist();
+    };
+  });
+}
+$('#open-checklist').addEventListener('click', openChecklist);
+
+// ---- CSV（表）で書き出す ----
+// 魚1行ずつ。Excel で文字化けしないよう、先頭に BOM（UTF-8 の目印）を付ける
+$('#btn-csv').addEventListener('click', () => {
+  const cols = ['日付','時刻','釣り場','緯度','経度','魚','大きさcm','匹数','潮回り','釣り方','メモ','時間帯','天気','気温','風向','風速m/s','雨mm','海水温','波の高さm','潮の動き','満潮・干潮との時間','潮位cm','潮位表の港'];
+  const q = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = [cols.join(',')];
+  for (const c of [...catches].sort((a, b) => a.at.localeCompare(b.at))){
+    const s = spotById(c.spotId), k = c.cond || {};
+    for (const f of fishesOf(c)) rows.push([c.at.slice(0, 10), c.at.slice(11, 16), s?.name || c.spotName, s?.lat, s?.lng, f.fish, f.size, f.count || 1, c.tide, c.method, c.memo,
+      k.band, k.wx, k.temp, k.windDir, k.wind, k.rain, k.sst, k.wave, k.trend, k.phase, k.tideCm, k.station].map(q).join(','));
+  }
+  const blob = new Blob(['﻿' + rows.join('\r\n')], {type: 'text/csv'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  const d = new Date(); a.download = `釣果_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.csv`;
+  document.body.appendChild(a); a.click(); a.remove(); toast(`${rows.length - 1}行を書き出しました`);
+});
+
+/* =========================================================
    10. ログイン・新規登録（Firebase Authentication）
    パスワードは Firebase が安全に管理し、このアプリやほかの人が見ることはできない
    ========================================================= */
@@ -1769,7 +1870,7 @@ function signedIn(){
   listenCloud(); showTab(currentTab || 'umi'); checkMigration();
 }
 function signedOut(){
-  unsubs.forEach(u => u()); unsubs = []; catches = []; spots = [];
+  unsubs.forEach(u => u()); unsubs = []; catches = []; spots = []; checklist = null;
   document.body.classList.add('signed-out'); $('#auth').hidden = false;
   renderAuth('login'); window.scrollTo(0, 0);
 }
