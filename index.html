@@ -121,7 +121,13 @@ textarea{min-height:80px;resize:vertical}
 .thumb{width:84px;height:84px;border-radius:10px;object-fit:cover;background:var(--sea-soft);display:flex;align-items:center;justify-content:center;
   font-family:var(--f-head);font-size:1.6rem;color:var(--sea);font-weight:900;overflow:hidden}
 .catch .info{min-width:0;display:flex;flex-direction:column;gap:2px}
-.catch .fish{font-family:var(--f-head);font-size:1.2rem;font-weight:700}
+.catch .fish{font-family:var(--f-head);font-size:1.2rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 釣果入力：魚の行（種類・大きさ・匹数・消す） */
+.fish-rows{display:flex;flex-direction:column;gap:8px}
+.fish-row{display:grid;grid-template-columns:minmax(0,1fr) 4.6em 3.8em 40px;gap:6px;align-items:center}
+.fish-row input{padding:10px 8px}
+.fish-head{font-size:.78rem;color:var(--muted);font-weight:700}
+.fr-del{border:0;background:var(--bg);border-radius:50%;width:40px;height:40px;font-size:1.1rem;cursor:pointer;color:var(--muted)}
 .catch .meta{font-size:.85rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .month-h{font-family:var(--f-head);color:var(--muted);font-size:.95rem;margin-top:6px}
 
@@ -729,16 +735,37 @@ async function renderUmi(){
 
 /* =========================================================
    6. 釣果帳
+   1件の記録（＝1回の釣行・1つの場面）に、魚を何行でも入れられる
+     fishes: [{fish:'アジ', size:30, count:1}, {fish:'アジ', size:20, count:10}, {fish:'サバ', size:null, count:3}]
+   前の形式（魚1種類だけ：fish / size / count）の記録も、同じ形に直して扱う
    ========================================================= */
+const fishesOf = c => Array.isArray(c.fishes) && c.fishes.length ? c.fishes : [{fish: c.fish || '', size: c.size ?? null, count: c.count || 1}];
+const countOf = c => fishesOf(c).reduce((a, f) => a + (f.count || 1), 0);
+const fishRows = cs => cs.flatMap(c => fishesOf(c).map(f => ({...f, count: f.count || 1, c})));   // 集計用：魚1行ずつに分解
+const maxSizeOf = c => { const s = fishesOf(c).map(f => f.size).filter(v => v != null); return s.length ? Math.max(...s) : null; };
+function fishSummary(c){   // 「アジ ×11・サバ ×3」のように魚の種類ごとにまとめた文字
+  const m = new Map(); for (const f of fishesOf(c)) m.set(f.fish, (m.get(f.fish) || 0) + (f.count || 1));
+  return [...m].map(([f, n]) => n > 1 ? `${f} ×${n}` : f).join('・');
+}
+const fishRowHtml = f => `<div class="fish-row">
+    <input class="fr-fish" list="fish-list" required value="${esc(f.fish)}" placeholder="例：アジ" aria-label="魚の種類">
+    <input class="fr-size" type="number" inputmode="decimal" step="0.1" min="0" value="${esc(f.size ?? '')}" placeholder="—" aria-label="大きさ（cm）">
+    <input class="fr-count" type="number" inputmode="numeric" min="1" value="${esc(f.count ?? 1)}" aria-label="匹数">
+    <button type="button" class="fr-del" aria-label="この行を消す">×</button>
+  </div>`;
+
 function catchForm(c){
-  const isNew = !c; c = c || {at: nowLocal(), count: 1, spotId: (spots[0] || {}).id || ''};
+  const isNew = !c; c = c || {at: nowLocal(), spotId: (spots[0] || {}).id || ''};
   const spotOpts = `<option value="">（場所を選ばない）</option>` + spots.map(s => `<option value="${esc(s.id)}"${s.id === c.spotId ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+  const rows = isNew ? [{fish: '', size: null, count: 1}] : fishesOf(c);
   openSheet(`${sheetHead(isNew ? '釣果を記録' : '釣果を直す')}
     <form id="cf" class="view" style="gap:12px">
-      <label class="field"><span>魚の種類</span><input id="cf-fish" list="fish-list" required value="${esc(c.fish)}" placeholder="例：アジ"></label>
-      <div class="grid2">
-        <label class="field"><span>大きさ（cm）</span><input id="cf-size" type="number" inputmode="decimal" step="0.1" min="0" value="${esc(c.size ?? '')}" placeholder="例：23"></label>
-        <label class="field"><span>匹数</span><input id="cf-count" type="number" inputmode="numeric" min="1" value="${esc(c.count ?? 1)}"></label>
+      <div class="field">
+        <span>釣れた魚</span>
+        <div class="fish-row fish-head" aria-hidden="true"><span>種類</span><span>cm</span><span>匹数</span><span></span></div>
+        <div id="cf-rows" class="fish-rows">${rows.map(fishRowHtml).join('')}</div>
+        <button type="button" class="btn" id="cf-addrow">＋ 魚を追加</button>
+        <p class="small muted" style="margin:0">大きさが違う魚は行を分けて入れられます（例：アジ 30cm ×1 と アジ 20cm ×10）。大きさを測っていなければ空のままでOK。</p>
       </div>
       <label class="field"><span>日時</span><input id="cf-at" type="datetime-local" required value="${esc(c.at)}"></label>
       <label class="field"><span>釣り場</span><select id="cf-spot">${spotOpts}</select></label>
@@ -749,8 +776,25 @@ function catchForm(c){
       ${c.hasPhoto ? `<label class="row small"><input type="checkbox" id="cf-rmphoto" style="width:auto;min-height:0"> 今の写真を消す</label>` : ''}
       <button class="btn primary block" type="submit">保存する</button>
     </form>`, b => {
+    // 魚の行の追加・削除（1行しかない時は消すボタンを隠す）
+    const rowsBox = b.querySelector('#cf-rows');
+    const syncDel = () => { const rs = rowsBox.querySelectorAll('.fish-row'); rs.forEach(r => r.querySelector('.fr-del').hidden = rs.length === 1); };
+    syncDel();
+    rowsBox.addEventListener('click', e => { if (e.target.closest('.fr-del')){ e.target.closest('.fish-row').remove(); syncDel(); } });
+    b.querySelector('#cf-addrow').addEventListener('click', () => {
+      const last = [...rowsBox.querySelectorAll('.fr-fish')].pop()?.value.trim() || '';
+      rowsBox.insertAdjacentHTML('beforeend', fishRowHtml({fish: last, size: null, count: 1}));   // 直前と同じ魚の名前を入れておく
+      syncDel();
+      const r = rowsBox.lastElementChild; (last ? r.querySelector('.fr-size') : r.querySelector('.fr-fish')).focus();
+    });
     b.querySelector('#cf').addEventListener('submit', async e => {
       e.preventDefault();
+      const fishes = [...rowsBox.querySelectorAll('.fish-row')].map(r => ({
+        fish: r.querySelector('.fr-fish').value.trim(),
+        size: r.querySelector('.fr-size').value === '' ? null : +r.querySelector('.fr-size').value,
+        count: Math.max(1, +r.querySelector('.fr-count').value || 1),
+      })).filter(f => f.fish);
+      if (!fishes.length) return toast('魚の種類を入れてください');
       const btn = e.target.querySelector('[type=submit]'); btn.disabled = true; btn.textContent = '保存中…';
       const file = b.querySelector('#cf-photo').files[0];
       let photo;                                            // undefined = 写真はそのまま
@@ -760,13 +804,12 @@ function catchForm(c){
       const rec = {
         ...c, id: c.id || uid(), at, spotId,
         spotName: spotById(spotId)?.name || '',
-        fish: b.querySelector('#cf-fish').value.trim(),
-        size: b.querySelector('#cf-size').value === '' ? null : +b.querySelector('#cf-size').value,
-        count: Math.max(1, +b.querySelector('#cf-count').value || 1),
+        fishes,
         method: b.querySelector('#cf-method').value.trim(),
         memo: b.querySelector('#cf-memo').value.trim(),
         tide: tideInfo(at).name,
       };
+      delete rec.fish; delete rec.size; delete rec.count;   // 前の形式の項目は消す
       try { await S.saveCatch(rec, photo); } catch { btn.disabled = false; btn.textContent = '保存する'; return toast('保存できませんでした'); }
       closeSheet(); toast(isNew ? '記録しました' : '直しました');
     });
@@ -776,11 +819,12 @@ $('#add-catch').addEventListener('click', () => catchForm());
 
 function catchDetail(id){
   const c = catches.find(x => x.id === id); if (!c) return;
-  openSheet(`${sheetHead(c.fish + (c.count > 1 ? ` ×${c.count}` : ''))}
+  const fishList = fishesOf(c).map(f => `<div>${esc(f.fish)}${f.size != null ? ` <span class="num">${esc(f.size)}cm</span>` : ''}${(f.count || 1) > 1 ? ` <span class="num muted">×${f.count}</span>` : ''}</div>`).join('');
+  openSheet(`${sheetHead(fishSummary(c))}
     ${c.thumb ? `<img class="photo-big" id="cd-photo" src="${esc(c.thumb)}" alt="">` : ''}
     <dl class="dl">
       <dt>日時</dt><dd class="num">${fmtDate(c.at)} ${esc(c.at.slice(11,16))}</dd>
-      <dt>大きさ</dt><dd class="num">${c.size != null ? esc(c.size) + ' cm' : '—'}</dd>
+      <dt>釣れた魚</dt><dd>${fishList}<div class="small muted num">合計 ${countOf(c)}匹</div></dd>
       <dt>釣り場</dt><dd>${esc(spotById(c.spotId)?.name || c.spotName || '—')}</dd>
       <dt>潮回り</dt><dd><span class="chip">${esc(c.tide)}</span></dd>
       <dt>釣り方</dt><dd>${esc(c.method || '—')}</dd>
@@ -800,7 +844,7 @@ function catchDetail(id){
 
 function renderLog(){
   const q = $('#log-q').value.trim();
-  const list = catches.filter(c => !q || (c.fish + (spotById(c.spotId)?.name || c.spotName || '')).includes(q)).sort((a,b) => b.at.localeCompare(a.at));
+  const list = catches.filter(c => !q || (fishesOf(c).map(f => f.fish).join(' ') + (spotById(c.spotId)?.name || c.spotName || '')).includes(q)).sort((a,b) => b.at.localeCompare(a.at));
   const box = $('#log-list');
   if (!catches.length){
     box.innerHTML = `<div class="card empty"><h3>まだ釣果がありません</h3><p style="margin:0">上の「釣果を記録する」から、釣れた魚を登録しましょう。写真も残せます。</p></div>`; return;
@@ -811,9 +855,10 @@ function renderLog(){
     const mo = c.at.slice(0,7);
     if (mo !== lastMonth){ html += `<div class="month-h">${+mo.slice(0,4)}年${+mo.slice(5)}月</div>`; lastMonth = mo; }
     html += `<button class="catch" type="button" data-id="${esc(c.id)}">
-      ${c.thumb ? `<img class="thumb" src="${esc(c.thumb)}" alt="">` : `<span class="thumb">${esc(c.fish.slice(0,1))}</span>`}
+      ${c.thumb ? `<img class="thumb" src="${esc(c.thumb)}" alt="">` : `<span class="thumb">${esc(fishesOf(c)[0].fish.slice(0,1))}</span>`}
       <span class="info">
-        <span class="fish">${esc(c.fish)}${c.count > 1 ? ` <span class="small muted">×${c.count}</span>` : ''}${c.size != null ? ` <span class="small num">${esc(c.size)}cm</span>` : ''}</span>
+        <span class="fish">${esc(fishSummary(c))}</span>
+        ${maxSizeOf(c) != null ? `<span class="meta num">最大 ${esc(maxSizeOf(c))}cm${countOf(c) > 1 ? `・合計 ${countOf(c)}匹` : ''}</span>` : countOf(c) > 1 ? `<span class="meta num">合計 ${countOf(c)}匹</span>` : ''}
         <span class="meta num">${fmtDate(c.at)} ${esc(c.at.slice(11,16))}　<span class="chip">${esc(c.tide)}</span></span>
         <span class="meta">${esc(spotById(c.spotId)?.name || c.spotName || '場所なし')}${c.method ? '・' + esc(c.method) : ''}</span>
       </span></button>`;
@@ -925,7 +970,7 @@ $('#add-spot').addEventListener('click', () => setAdding(true));
 $('#add-cancel').addEventListener('click', () => setAdding(false));
 $('#add-here').addEventListener('click', () => { const c = map.getCenter(); setAdding(false); spotForm({lat: +c.lat.toFixed(5), lng: +c.lng.toFixed(5)}); });
 
-function spotStats(id){ const cs = catches.filter(c => c.spotId === id); return {n: cs.reduce((a,c) => a + c.count, 0), days: new Set(cs.map(c => c.at.slice(0,10))).size}; }
+function spotStats(id){ const cs = catches.filter(c => c.spotId === id); return {n: cs.reduce((a,c) => a + countOf(c), 0), days: new Set(cs.map(c => c.at.slice(0,10))).size}; }
 function renderSpotList(){
   const box = $('#spot-list');
   if (!spots.length){ box.innerHTML = `<div class="card empty"><h3>釣り場が未登録です</h3><p style="margin:0">上の「釣り場を追加する」から、よく行く釣り場を登録しましょう。登録すると、その場所の天気と潮が見られます。</p></div>`; return; }
@@ -950,7 +995,7 @@ function spotForm(s){
 }
 function spotDetail(id){
   const s = spotById(id); if (!s) return; const st = spotStats(id);
-  const fishCount = {}; catches.filter(c => c.spotId === id).forEach(c => fishCount[c.fish] = (fishCount[c.fish] || 0) + c.count);
+  const fishCount = {}; fishRows(catches.filter(c => c.spotId === id)).forEach(f => fishCount[f.fish] = (fishCount[f.fish] || 0) + f.count);
   const top = Object.entries(fishCount).sort((a,b) => b[1]-a[1]).slice(0,5).map(([f,n]) => `${esc(f)} ${n}匹`).join('、');
   openSheet(`${sheetHead(s.name)}
     ${s.memo ? `<p style="margin:0;white-space:pre-wrap">${esc(s.memo)}</p>` : ''}
@@ -978,26 +1023,27 @@ function renderStats(){
   renderAccount();
   const box = $('#stats-body');
   if (!catches.length){ box.innerHTML = `<div class="card empty"><h3>まだ集計する記録がありません</h3><p style="margin:0">釣果を記録すると、ここに魚の種類別・潮回り別の成績が出ます。</p></div>`; return; }
-  const total = catches.reduce((a,c) => a + c.count, 0);
+  const rows = fishRows(catches);   // 魚1行ずつ（1件の記録に複数の魚があっても正しく数える）
+  const total = rows.reduce((a,f) => a + f.count, 0);
   const days = new Set(catches.map(c => c.at.slice(0,10)));
-  const biggest = catches.filter(c => c.size != null).sort((a,b) => b.size - a.size)[0];
+  const biggest = rows.filter(f => f.size != null).sort((a,b) => b.size - a.size)[0];
 
-  const byFish = {}; catches.forEach(c => byFish[c.fish] = (byFish[c.fish] || 0) + c.count);
+  const byFish = {}; rows.forEach(f => byFish[f.fish] = (byFish[f.fish] || 0) + f.count);
   const fishE = Object.entries(byFish).sort((a,b) => b[1]-a[1]).slice(0,8);
 
   // 潮回り別：1回の釣行あたり何匹釣れたか（平均）
   const tideN = {}, tideD = {};
-  catches.forEach(c => { tideN[c.tide] = (tideN[c.tide] || 0) + c.count; (tideD[c.tide] ||= new Set()).add(c.at.slice(0,10)); });
+  catches.forEach(c => { tideN[c.tide] = (tideN[c.tide] || 0) + countOf(c); (tideD[c.tide] ||= new Set()).add(c.at.slice(0,10)); });
   const tideE = TIDE_ORDER.filter(t => tideD[t]).map(t => [t, tideN[t] / tideD[t].size, tideD[t].size]);
 
   // 月別（直近12か月）
   const monthE = [];
-  for (let i = 11; i >= 0; i--){ const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i); const k = `${d.getFullYear()}-${pad(d.getMonth()+1)}`; monthE.push([`${d.getMonth()+1}月`, catches.filter(c => c.at.startsWith(k)).reduce((a,c) => a + c.count, 0)]); }
+  for (let i = 11; i >= 0; i--){ const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i); const k = `${d.getFullYear()}-${pad(d.getMonth()+1)}`; monthE.push([`${d.getMonth()+1}月`, catches.filter(c => c.at.startsWith(k)).reduce((a,c) => a + countOf(c), 0)]); }
 
   // 魚種ごとの最大サイズ
-  const best = {}; catches.forEach(c => { if (c.size != null && (!best[c.fish] || c.size > best[c.fish].size)) best[c.fish] = c; });
+  const best = {}; rows.forEach(f => { if (f.size != null && (!best[f.fish] || f.size > best[f.fish].size)) best[f.fish] = f; });
   const bestRows = Object.values(best).sort((a,b) => b.size - a.size).slice(0,8)
-    .map(c => `<div class="bar" style="grid-template-columns:6.5em 1fr auto"><span class="bar-k">${esc(c.fish)}</span><span class="small muted num">${fmtDate(c.at)}・${esc(spotById(c.spotId)?.name || c.spotName || '')}</span><span class="bar-v">${esc(c.size)}cm</span></div>`).join('');
+    .map(f => `<div class="bar" style="grid-template-columns:6.5em 1fr auto"><span class="bar-k">${esc(f.fish)}</span><span class="small muted num">${fmtDate(f.c.at)}・${esc(spotById(f.c.spotId)?.name || f.c.spotName || '')}</span><span class="bar-v">${esc(f.size)}cm</span></div>`).join('');
 
   box.innerHTML = `
     <div class="tiles">
