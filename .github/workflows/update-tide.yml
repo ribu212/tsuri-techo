@@ -1,0 +1,30 @@
+# 気象庁の潮位表を毎月自動で取ってきて、変わっていればサイトに反映する設定（GitHub Actions）
+name: 潮位表を自動更新
+
+on:
+  schedule:
+    - cron: "0 18 1 * *"   # 毎月2日 午前3時（日本時間）に実行（cron は世界標準時で書くので 1日18時）
+  workflow_dispatch:        # GitHub の画面から手動でも実行できるように
+
+permissions:
+  contents: write           # 更新したファイルを保存（コミット）するための許可
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 潮位表をダウンロード
+        run: python scripts/update_tide.py
+
+      - name: 変更を保存
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898288+github-actions[bot]@users.noreply.github.com"
+          git add tide
+          git diff --cached --quiet || (git commit -m "潮位表を自動更新 $(date -u +%Y-%m-%d)" && git push)
