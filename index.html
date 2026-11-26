@@ -132,6 +132,12 @@ textarea{min-height:80px;resize:vertical}
 .fish-row{display:grid;grid-template-columns:minmax(0,1fr) 4.6em 3.8em 40px;gap:6px;align-items:center}
 .fish-row input{padding:10px 8px}
 .fish-head{font-size:.78rem;color:var(--muted);font-weight:700}
+.photo-strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.photo-strip .ph{position:relative;flex:none;width:72px;height:72px;padding:0;border:2px solid transparent;border-radius:10px;overflow:hidden;background:var(--bg);cursor:pointer}
+.photo-strip .ph img{width:100%;height:100%;object-fit:cover}
+#cd-strip .ph[aria-pressed="true"]{border-color:var(--sea)}
+.ph-x{display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:rgba(0,0,0,.55);color:#fff;font-size:2rem;font-weight:700}
+#cf-photos .ph[aria-pressed="true"] .ph-x{display:flex}
 .fr-del{border:0;background:var(--bg);border-radius:50%;width:40px;height:40px;font-size:1.1rem;cursor:pointer;color:var(--muted)}
 .catch .meta{font-size:.85rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .month-h{font-family:var(--f-head);color:var(--muted);font-size:.95rem;margin-top:6px}
@@ -418,17 +424,20 @@ const localStore = {
     cs = cs.filter(c => !c.sample); ss = ss.filter(s => !s.sample);
     for (const c of cs){
       if (!(c.photo instanceof Blob)) continue;
-      try { const p = await makePhoto(c.photo); await dbTx('photos', st => st.put({id: c.id, data: p.full})); c.thumb = p.thumb; c.hasPhoto = true; } catch {}
+      try { const p = await makePhoto(c.photo); await dbTx('photos', st => st.put({id: c.id, data: p.full})); c.photos = [{id: c.id, thumb: p.thumb}]; c.thumb = p.thumb; c.hasPhoto = true; } catch {}
       delete c.photo; await dbTx('catches', st => st.put(c));
     }
     return {cs, ss};
   },
-  async saveCatch(rec, photo){
-    if (photo){ await dbTx('photos', st => st.put({id: rec.id, data: photo.full})); rec.thumb = photo.thumb; rec.hasPhoto = true; }
-    else if (photo === false){ await dbTx('photos', st => st.delete(rec.id)); rec.thumb = null; rec.hasPhoto = false; }
-    await dbTx('catches', st => st.put(rec)); await reloadLocal();
+  async saveCatch(rec){ await dbTx('catches', st => st.put(rec)); await reloadLocal(); },
+  async deleteCatch(id){
+    const c = catches.find(x => x.id === id);
+    await dbTx('catches', st => st.delete(id));
+    for (const p of c ? photosOf(c) : [{id}]) await dbTx('photos', st => st.delete(p.id));
+    await reloadLocal();
   },
-  async deleteCatch(id){ await dbTx('catches', st => st.delete(id)); await dbTx('photos', st => st.delete(id)); await reloadLocal(); },
+  async putPhoto(id, data){ await dbTx('photos', st => st.put({id, data})); },
+  async deletePhoto(id){ await dbTx('photos', st => st.delete(id)); },
   async saveSpot(rec){ await dbTx('spots', st => st.put(rec)); await reloadLocal(); },
   async deleteSpot(id){ await dbTx('spots', st => st.delete(id)); await reloadLocal(); },
   async getPhoto(id){ return (await dbGet('photos', id))?.data || null; },
@@ -463,16 +472,33 @@ function listenCloud(){
 const cloudStore = {
   mode: 'cloud',
   // 書き込みは待たずに進める（電波が無くても画面はすぐ更新され、送信は後で自動で行われる）
-  async saveCatch(rec, photo){
-    if (photo){ rec.thumb = photo.thumb; rec.hasPhoto = true; sent(fb.F.setDoc(userDoc('photos', rec.id), {id: rec.id, data: photo.full})); }
-    else if (photo === false){ rec.thumb = null; rec.hasPhoto = false; sent(fb.F.deleteDoc(userDoc('photos', rec.id))); }
-    sent(fb.F.setDoc(userDoc('catches', rec.id), plain(rec)));
+  async saveCatch(rec){ sent(fb.F.setDoc(userDoc('catches', rec.id), plain(rec))); },
+  async deleteCatch(id){
+    const c = catches.find(x => x.id === id);
+    sent(fb.F.deleteDoc(userDoc('catches', id)));
+    for (const p of c ? photosOf(c) : [{id}]) sent(fb.F.deleteDoc(userDoc('photos', p.id)));
   },
-  async deleteCatch(id){ sent(fb.F.deleteDoc(userDoc('catches', id))); sent(fb.F.deleteDoc(userDoc('photos', id))); },
+  async putPhoto(id, data){ sent(fb.F.setDoc(userDoc('photos', id), {id, data})); },
+  async deletePhoto(id){ sent(fb.F.deleteDoc(userDoc('photos', id))); },
   async saveSpot(rec){ sent(fb.F.setDoc(userDoc('spots', rec.id), plain(rec))); },
   async deleteSpot(id){ sent(fb.F.deleteDoc(userDoc('spots', id))); },
   async getPhoto(id){ try { const s = await fb.F.getDoc(userDoc('photos', id)); return s.exists() ? s.data().data : null; } catch { return null; } },
 };
+
+/* ---- 写真（1件の釣果に最大5枚）----
+   c.photos = [{id, thumb}]：thumb は一覧用の小さい画像、大きい画像は photos に id ごとに保存
+   前の形式（写真1枚：hasPhoto / thumb、写真の id は釣果の id と同じ）も同じ形で扱う */
+const MAX_PHOTOS = 5;
+const photosOf = c => Array.isArray(c.photos) ? c.photos : (c.hasPhoto ? [{id: c.id, thumb: c.thumb}] : []);
+async function saveCatchWithPhotos(rec, add = [], removeIds = []){
+  const keep = photosOf(rec).filter(p => !removeIds.includes(p.id));
+  for (const id of removeIds) await S.deletePhoto(id);
+  for (const p of add.slice(0, Math.max(0, MAX_PHOTOS - keep.length))){
+    const id = `${rec.id}_${uid()}`; await S.putPhoto(id, p.full); keep.push({id, thumb: p.thumb});
+  }
+  rec.photos = keep; rec.thumb = keep[0]?.thumb || null; rec.hasPhoto = keep.length > 0;
+  await S.saveCatch(rec);
+}
 
 /* 記録が変わったら、いま開いている画面を描き直す */
 function onData(){
@@ -860,8 +886,11 @@ function catchForm(c){
       </div>
       <label class="field"><span>釣り方・エサ</span><input id="cf-method" value="${esc(c.method)}" placeholder="例：サビキ／アミエビ"></label>
       <label class="field"><span>メモ</span><textarea id="cf-memo" placeholder="例：朝マヅメに群れが回ってきた">${esc(c.memo)}</textarea></label>
-      <label class="field"><span>写真</span><input id="cf-photo" type="file" accept="image/*"></label>
-      ${c.hasPhoto ? `<label class="row small"><input type="checkbox" id="cf-rmphoto" style="width:auto;min-height:0"> 今の写真を消す</label>` : ''}
+      <div class="field"><span>写真（${MAX_PHOTOS}枚まで）</span>
+        ${photosOf(c).length ? `<div class="photo-strip" id="cf-photos">${photosOf(c).map(p => `<button type="button" class="ph" data-pid="${esc(p.id)}" aria-pressed="false" aria-label="この写真を消す印を付ける"><img src="${esc(p.thumb)}" alt=""><span class="ph-x">×</span></button>`).join('')}</div>
+        <p class="small muted" style="margin:0">消したい写真は、押して × の印を付けてから保存してください。</p>` : ''}
+        <input id="cf-photo" type="file" accept="image/*" multiple>
+      </div>
       <button class="btn primary block" type="submit">保存する</button>
     </form>`, b => {
     // 魚の行の追加・削除（1行しかない時は消すボタンを隠す）
@@ -875,6 +904,8 @@ function catchForm(c){
       syncDel();
       const r = rowsBox.lastElementChild; (last ? r.querySelector('.fr-size') : r.querySelector('.fr-fish')).focus();
     });
+    // 今ある写真：押すと「消す」印が付く／外れる
+    b.querySelectorAll('#cf-photos .ph').forEach(x => x.onclick = () => x.setAttribute('aria-pressed', x.getAttribute('aria-pressed') !== 'true'));
     // ---- 釣った場所：今いる場所 / 地図で選ぶ / 登録済みから ----
     const place = {mode: '', lat: null, lng: null, near: null, seq: 0};
     const info = b.querySelector('#cf-place-info'), nameWrap = b.querySelector('#cf-name-wrap'), nameIn = b.querySelector('#cf-place-name');
@@ -934,10 +965,11 @@ function catchForm(c){
         const s = {id: uid(), name: nameIn.value.trim() || '名前のない釣り場', memo: '', lat: place.lat, lng: place.lng};
         await S.saveSpot(s); spotId = s.id; spotName = s.name;
       }
-      const file = b.querySelector('#cf-photo').files[0];
-      let photo;                                            // undefined = 写真はそのまま
-      if (b.querySelector('#cf-rmphoto')?.checked) photo = false;
-      if (file){ try { photo = await makePhoto(file); } catch { toast('写真を読み込めませんでした'); } }
+      // 写真：× の印を付けたものを消し、新しく選んだものを足す（合わせて5枚まで）
+      const removeIds = [...b.querySelectorAll('#cf-photos .ph[aria-pressed="true"]')].map(x => x.dataset.pid);
+      const add = [];
+      for (const f of b.querySelector('#cf-photo').files){ try { add.push(await makePhoto(f)); } catch { toast('読み込めない写真がありました'); } }
+      if (photosOf(c).length - removeIds.length + add.length > MAX_PHOTOS) toast(`写真は${MAX_PHOTOS}枚までです。はじめの${MAX_PHOTOS}枚を保存します`);
       const at = b.querySelector('#cf-at').value;
       const rec = {
         ...c, id: c.id || uid(), at, spotId, spotName,
@@ -947,7 +979,7 @@ function catchForm(c){
         tide: tideInfo(at).name,
       };
       delete rec.fish; delete rec.size; delete rec.count;   // 前の形式の項目は消す
-      try { await S.saveCatch(rec, photo); } catch { btn.disabled = false; btn.textContent = '保存する'; return toast('保存できませんでした'); }
+      try { await saveCatchWithPhotos(rec, add, removeIds); } catch { btn.disabled = false; btn.textContent = '保存する'; return toast('保存できませんでした'); }
       closeSheet(); toast(isNew ? '記録しました' : '直しました');
     });
   });
@@ -958,7 +990,8 @@ function catchDetail(id){
   const c = catches.find(x => x.id === id); if (!c) return;
   const fishList = fishesOf(c).map(f => `<div>${esc(f.fish)}${f.size != null ? ` <span class="num">${esc(f.size)}cm</span>` : ''}${(f.count || 1) > 1 ? ` <span class="num muted">×${f.count}</span>` : ''}</div>`).join('');
   openSheet(`${sheetHead(fishSummary(c))}
-    ${c.thumb ? `<img class="photo-big" id="cd-photo" src="${esc(c.thumb)}" alt="">` : ''}
+    ${photosOf(c).length ? `<img class="photo-big" id="cd-photo" src="${esc(photosOf(c)[0].thumb)}" alt="">` : ''}
+    ${photosOf(c).length > 1 ? `<div class="photo-strip" id="cd-strip">${photosOf(c).map((p, i) => `<button type="button" class="ph" data-pid="${esc(p.id)}" aria-pressed="${i === 0}"><img src="${esc(p.thumb)}" alt="写真${i + 1}"></button>`).join('')}</div>` : ''}
     <dl class="dl">
       <dt>日時</dt><dd class="num">${fmtDate(c.at)} ${esc(c.at.slice(11,16))}</dd>
       <dt>釣れた魚</dt><dd>${fishList}<div class="small muted num">合計 ${countOf(c)}匹</div></dd>
@@ -969,7 +1002,14 @@ function catchDetail(id){
     </dl>
     <div class="grid2"><button class="btn" id="cd-edit" type="button">直す</button><button class="btn danger" id="cd-del" type="button">削除</button></div>`, b => {
     // まず小さい写真を出し、大きい写真が届いたら差し替える
-    if (c.hasPhoto) S.getPhoto(c.id).then(u => { const img = b.querySelector('#cd-photo'); if (u && img && u.startsWith('data:image/')) img.src = u; });
+    const showPhoto = pid => {
+      const p = photosOf(c).find(x => x.id === pid), img = b.querySelector('#cd-photo'); if (!p || !img) return;
+      img.src = p.thumb; img.dataset.pid = pid;
+      b.querySelectorAll('#cd-strip .ph').forEach(x => x.setAttribute('aria-pressed', x.dataset.pid === pid));
+      S.getPhoto(pid).then(u => { if (u && u.startsWith('data:image/') && img.dataset.pid === pid) img.src = u; });
+    };
+    if (photosOf(c).length) showPhoto(photosOf(c)[0].id);
+    b.querySelectorAll('#cd-strip .ph').forEach(x => x.onclick = () => showPhoto(x.dataset.pid));
     b.querySelector('#cd-edit').onclick = () => catchForm(c);
     const del = b.querySelector('#cd-del');
     del.onclick = async () => {
@@ -1019,8 +1059,9 @@ $('#migrate-go').addEventListener('click', async () => {
   const btn = $('#migrate-go'); btn.disabled = true; btn.textContent = '移しています…';
   for (const s of pendingLocal.ss) await S.saveSpot(s);
   for (const c of pendingLocal.cs){
-    const full = c.hasPhoto ? await localStore.getPhoto(c.id) : null;
-    await S.saveCatch({...c}, full ? {full, thumb: c.thumb} : undefined);
+    const add = [];
+    for (const p of photosOf(c)){ const full = await localStore.getPhoto(p.id); if (full) add.push({full, thumb: p.thumb}); }
+    await saveCatchWithPhotos({...c, photos: [], thumb: null, hasPhoto: false}, add);
   }
   await localStore.clearAll(); pendingLocal = null;
   $('#migrate-banner').hidden = true; btn.disabled = false; btn.textContent = 'アカウントに移す';
@@ -1352,8 +1393,12 @@ function renderAccount(){
 $('#btn-export').addEventListener('click', async () => {
   toast('書き出しの準備をしています…');
   const cs = [];
-  for (const c of catches) cs.push({...c, photo: c.hasPhoto ? await S.getPhoto(c.id) : null});
-  const blob = new Blob([JSON.stringify({app:'tsuri-techo', v:2, spots, catches: cs})], {type:'application/json'});
+  for (const c of catches){
+    const images = [];
+    for (const p of photosOf(c)){ const u = await S.getPhoto(p.id); if (u) images.push(u); }
+    cs.push({...c, photos: [], thumb: null, hasPhoto: false, images});
+  }
+  const blob = new Blob([JSON.stringify({app:'tsuri-techo', v:3, spots, catches: cs})], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   const d = new Date(); a.download = `釣り手帳_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.json`;
   document.body.appendChild(a); a.click(); a.remove(); toast('書き出しました');
@@ -1365,9 +1410,13 @@ $('#import-file').addEventListener('change', async e => {
     if (data.app !== 'tsuri-techo') throw 0;
     for (const s of data.spots || []) await S.saveSpot(s);
     for (const c of data.catches || []){
-      const {photo, ...rec} = c; let p;
-      if (typeof photo === 'string' && photo.startsWith('data:image/')){ try { p = await makePhoto(await (await fetch(photo)).blob()); } catch {} }
-      await S.saveCatch(rec, p);
+      // 写真：新しい形式は images（複数）、前の形式は photo（1枚）
+      const {photo, images, ...rec} = c;
+      const add = [];
+      for (const u of (images || [photo]).filter(u => typeof u === 'string' && u.startsWith('data:image/'))){
+        try { add.push(await makePhoto(await (await fetch(u)).blob())); } catch {}
+      }
+      await saveCatchWithPhotos({...rec, photos: [], thumb: null, hasPhoto: false}, add);
     }
     toast('読み込みました');
   } catch { toast('このファイルは読み込めませんでした'); }
